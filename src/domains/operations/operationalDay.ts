@@ -110,6 +110,36 @@ export function expandCalendarBoundsForOperationalFetch(
   }
 }
 
+export function cashRegisterSessionPeriodAnchor(session: {
+  closedAt: string | null
+  openedAt: string
+}): string {
+  return session.closedAt ?? session.openedAt
+}
+
+export function filterCashRegisterSessionsByOperationalPeriod<
+  T extends { closedAt: string | null; openedAt: string },
+>(
+  rows: T[],
+  from: string | null,
+  to: string | null,
+  timeZone: string,
+  closeTime: string,
+): T[] {
+  if (!from && !to) return rows
+  return rows.filter((row) =>
+    isOperationalDayInRange(
+      operationalDayKey(
+        cashRegisterSessionPeriodAnchor(row),
+        timeZone,
+        closeTime,
+      ),
+      from,
+      to,
+    ),
+  )
+}
+
 export function filterSalesByOperationalPeriod<T extends { soldAt: string }>(
   rows: T[],
   from: string | null,
