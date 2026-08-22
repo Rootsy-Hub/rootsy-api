@@ -96,6 +96,60 @@ export async function computeChartAccountBalanceAsOf(
     : roundMoney(sums.debit - sums.credit)
 }
 
+export async function computeLedgerBalancesByAccountIds(
+  supabase: SupabaseClient,
+  popId: string,
+  accountIds: string[],
+): Promise<Map<string, number>> {
+  const balances = new Map<string, number>()
+  const unique = [...new Set(accountIds.filter(Boolean))]
+  if (unique.length === 0) return balances
+
+  const { data: accRows } = await supabase
+    .from("accounting_chart_of_accounts")
+    .select("id, nature")
+    .eq("pop_id", popId)
+    .in("id", unique)
+  const natureById = new Map<string, string>()
+  for (const row of accRows || []) {
+    natureById.set(String(row.id), String(row.nature ?? "deudora"))
+  }
+  for (const id of unique) balances.set(id, 0)
+
+  let from = 0
+  while (true) {
+    const { data, error } = await supabase
+      .from("accounting_entry_lines")
+      .select(
+        `
+        account_id,
+        debit_amount,
+        credit_amount,
+        accounting_entries!inner ( pop_id, status )
+      `,
+      )
+      .in("account_id", unique)
+      .eq("accounting_entries.pop_id", popId)
+      .eq("accounting_entries.status", "posted")
+      .range(from, from + LINE_PAGE - 1)
+    if (error) break
+    const rows = data || []
+    for (const row of rows) {
+      const accountId = String(row.account_id)
+      const nature = natureById.get(accountId) ?? "deudora"
+      const debit = parseMoney(row.debit_amount)
+      const credit = parseMoney(row.credit_amount)
+      const prev = balances.get(accountId) ?? 0
+      const delta = nature === "acreedora" ? credit - debit : debit - credit
+      balances.set(accountId, roundMoney(prev + delta))
+    }
+    if (rows.length < LINE_PAGE) break
+    from += LINE_PAGE
+    if (from > 200_000) break
+  }
+  return balances
+}
+
 export async function computeChartAccountPeriodFlow(
   supabase: SupabaseClient,
   popId: string,
