@@ -42,6 +42,9 @@ Queda en `http://localhost:8787`.
 - `GET|PATCH|DELETE /v1/pops/:popId/comanda-stations/:stationId` — detalle (incluye categoryCount)
 - `GET /v1/pops/:popId/service-categories` — servicios
 - `GET /v1/pops/:popId/suppliers` — proveedores activos (id, nombre). `?q=` busca por nombre o CUIT
+- `GET /v1/pops/:popId/suppliers/table` — listado paginado de proveedores
+- `POST /v1/pops/:popId/suppliers` — crear proveedor
+- `PATCH|DELETE /v1/pops/:popId/suppliers/:supplierId` — editar / borrar
 
 Rutas privadas piden:
 
