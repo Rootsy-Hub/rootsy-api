@@ -201,7 +201,7 @@ async function computePeriodGrossForChildAccount(
     "purchase_payments",
     "expense_payments",
     "pop_employee_payments",
-  ] as const)
+  ] as const) {
     const { data, error } = await supabase
       .from(table)
       .select("amount, paid_at")
