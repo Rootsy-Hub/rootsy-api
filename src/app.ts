@@ -23,6 +23,7 @@ import { checkRoutes } from "./domains/checks/routes.js"
 import { currentAccountRoutes } from "./domains/current-accounts/routes.js"
 import { inventoryRoutes } from "./domains/inventory/routes.js"
 import { operationRoutes } from "./domains/operations/routes.js"
+import { reportRoutes } from "./domains/reports/routes.js"
 import { settingsRoutes } from "./domains/settings/routes.js"
 import { getEnv } from "./env.js"
 import { isTimeoutError } from "./lib/fetchTimeout.js"
@@ -75,6 +76,7 @@ export function createApp() {
   pop.route("/current-accounts", currentAccountRoutes)
   pop.route("/inventory", inventoryRoutes)
   pop.route("/operations", operationRoutes)
+  pop.route("/reports", reportRoutes)
   pop.route("/settings", settingsRoutes)
 
   v1.route("/pops/:popId", pop)
