@@ -25,15 +25,21 @@ import { inventoryRoutes } from "./domains/inventory/routes.js"
 import { operationRoutes } from "./domains/operations/routes.js"
 import { reportRoutes } from "./domains/reports/routes.js"
 import { cashRegisterRoutes } from "./domains/cash-registers/routes.js"
+import { statisticsRoutes } from "./domains/statistics/routes.js"
 import { treasuryRoutes } from "./domains/treasury/routes.js"
 import { settingsRoutes } from "./domains/settings/routes.js"
 import { getEnv } from "./env.js"
 import { isTimeoutError } from "./lib/fetchTimeout.js"
 import { requireRequestTimeout } from "./lib/requestTimeout.js"
+import type { RealtimeBindings } from "./realtime/bindings.js"
+import {
+  realtimePublishRoutes,
+  realtimeWsRoutes,
+} from "./realtime/routes.js"
 import { requirePopSidecar, type SidecarEnv } from "./sidecar/pop.js"
 
 export function createApp() {
-  const app = new Hono()
+  const app = new Hono<{ Bindings: RealtimeBindings }>()
 
   app.onError((err, c) => {
     if (c.finalized) return c.res
@@ -45,6 +51,7 @@ export function createApp() {
 
   app.get("/health", (c) => c.json({ ok: true }))
   app.get("/ping", (c) => c.json({ pong: true }))
+  app.route("/realtime/pops/:popId", realtimeWsRoutes)
 
   const v1 = new Hono<PrivateAuthEnv>()
   v1.use("*", (c, next) =>
@@ -80,8 +87,10 @@ export function createApp() {
   pop.route("/operations", operationRoutes)
   pop.route("/reports", reportRoutes)
   pop.route("/cash-registers", cashRegisterRoutes)
+  pop.route("/statistics", statisticsRoutes)
   pop.route("/treasury", treasuryRoutes)
   pop.route("/settings", settingsRoutes)
+  pop.route("/realtime", realtimePublishRoutes)
 
   v1.route("/pops/:popId", pop)
   app.route("/v1", v1)

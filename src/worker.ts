@@ -1,9 +1,12 @@
 import { createApp } from "./app.js"
 import { initEnv, type EnvSource } from "./env.js"
+import type { RealtimeBindings } from "./realtime/bindings.js"
+
+export { PopRealtime } from "./realtime/PopRealtime.js"
 
 const app = createApp()
 
-export type WorkerBindings = {
+export type WorkerBindings = RealtimeBindings & {
   SUPABASE_URL: string
   SUPABASE_ANON_KEY: string
   SUPABASE_JWT_SECRET?: string

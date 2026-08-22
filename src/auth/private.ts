@@ -4,8 +4,10 @@ import type { SupabaseClient } from "@supabase/supabase-js"
 import { getEnv } from "../env.js"
 import { userIdFromPayload, verifySupabaseAccessToken } from "./jwt.js"
 import { createUserSupabaseClient } from "../lib/supabase.js"
+import type { RealtimeBindings } from "../realtime/bindings.js"
 
 export type PrivateAuthEnv = {
+  Bindings: RealtimeBindings
   Variables: {
     accessToken: string
     userId: string
