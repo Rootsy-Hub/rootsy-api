@@ -15,8 +15,11 @@ export const upsertEmployeeBodySchema = z.object({
   notes: z.string(),
 })
 
+export const DAY_MARK_KINDS = ["franco", "falta"] as const
+
 export const francoBodySchema = z.object({
   day: z.string(),
+  kind: z.enum(DAY_MARK_KINDS).default("franco"),
 })
 
 export const EMPLOYEE_PAYMENT_KINDS = [
@@ -84,9 +87,12 @@ export type AttendancePunchRow = {
   clockedOutAt: string | null
 }
 
+export type DayMarkKind = (typeof DAY_MARK_KINDS)[number]
+
 export type FrancoRow = {
   id: string
   day: string
+  kind: DayMarkKind
 }
 
 export type EmployeePaymentRow = {

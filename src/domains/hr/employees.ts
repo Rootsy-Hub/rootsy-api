@@ -159,7 +159,7 @@ export async function getEmployeeDetail(
 
   const { data: francoRows, error: francoError } = await supabase
     .from("pop_employee_francos")
-    .select("id, day")
+    .select("id, day, kind")
     .eq("pop_id", popId)
     .eq("employee_id", employeeId)
     .order("day", { ascending: false })
@@ -192,6 +192,7 @@ export async function getEmployeeDetail(
   const francos: FrancoRow[] = (francoRows || []).map((franco) => ({
     id: String(franco.id),
     day: asCalendarDay(String(franco.day ?? "")),
+    kind: franco.kind === "falta" ? "falta" : "franco",
   }))
   const payments: EmployeePaymentRow[] = (paymentRows || []).map((payment) => {
     const account = payment.treasury_accounts as unknown as
@@ -443,17 +444,20 @@ export async function clockEmployeeIn(
 
   const timeZone = await loadPopTimeZone(supabase, popId, popSiteId)
   const today = entryDateIsoInTimezone(timeZone)
-  const { data: todayFranco } = await supabase
+  const { data: todayMark } = await supabase
     .from("pop_employee_francos")
-    .select("id")
+    .select("id, kind")
     .eq("pop_id", popId)
     .eq("employee_id", employeeId)
     .eq("day", today)
     .maybeSingle()
-  if (todayFranco) {
+  if (todayMark) {
     return {
       success: false,
-      error: "Hoy está de franco. Sacalo si vino a trabajar.",
+      error:
+        todayMark.kind === "falta"
+          ? "Hoy está marcada falta. Sacala si vino a trabajar."
+          : "Hoy está de franco. Sacalo si vino a trabajar.",
       status: 400,
     }
   }
@@ -496,6 +500,7 @@ export async function markEmployeeFranco(
   popSiteId: string,
   employeeId: string,
   day: string,
+  kind: "franco" | "falta" = "franco",
 ): Promise<MutateResult> {
   const francoDay = asCalendarDay(day)
   if (!CALENDAR_DAY_RE.test(francoDay)) {
@@ -534,7 +539,7 @@ export async function markEmployeeFranco(
   if (workedThatDay) {
     return {
       success: false,
-      error: "Ese día ya tiene llegada. No puede ser franco.",
+      error: "Ese día ya tiene llegada. No puede ser franco ni falta.",
       status: 400,
     }
   }
@@ -543,12 +548,13 @@ export async function markEmployeeFranco(
     pop_id: popId,
     employee_id: employeeId,
     day: francoDay,
+    kind,
   })
   if (error) {
     if (error.code === "23505") {
       return {
         success: false,
-        error: "Ese día ya está marcado como franco.",
+        error: "Ese día ya está marcado.",
         status: 409,
       }
     }

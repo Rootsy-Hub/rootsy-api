@@ -228,7 +228,16 @@ export async function createInvitation(
     }
   }
   if (employee.user_id) {
-    return { success: false, error: "Esa persona ya entra a Rootsy.", status: 400 }
+    const { data: membership } = await supabase
+      .from("user_pop_roles")
+      .select("is_active")
+      .eq("pop_id", popId)
+      .eq("user_id", employee.user_id)
+      .maybeSingle()
+
+    if (membership && membership.is_active !== false) {
+      return { success: false, error: "Esa persona ya entra a Rootsy.", status: 400 }
+    }
   }
 
   const email = String(employee.email || "").trim().toLowerCase()
@@ -388,6 +397,64 @@ export async function deactivateMember(
     .update({ is_active: false })
     .eq("pop_id", popId)
     .eq("user_id", memberUserId)
+
+  if (error) return { success: false, error: error.message, status: 500 }
+  return { success: true }
+}
+
+export async function reactivateMember(
+  supabase: SupabaseClient,
+  popId: string,
+  ownerUserId: string | null,
+  memberUserId: string,
+): Promise<MutateResult> {
+  if (ownerUserId && sameUserId(memberUserId, ownerUserId)) {
+    return {
+      success: false,
+      error: "El propietario ya tiene acceso.",
+      status: 400,
+    }
+  }
+
+  const { data: membership, error: lookErr } = await supabase
+    .from("user_pop_roles")
+    .select("id, is_active")
+    .eq("pop_id", popId)
+    .eq("user_id", memberUserId)
+    .maybeSingle()
+
+  if (lookErr) return { success: false, error: lookErr.message, status: 500 }
+  if (!membership) {
+    return {
+      success: false,
+      error: "Esa persona no tiene un acceso previo para restaurar.",
+      status: 404,
+    }
+  }
+  if (membership.is_active !== false) {
+    return { success: false, error: "Esa persona ya entra a Rootsy.", status: 400 }
+  }
+
+  const { data: employee, error: employeeErr } = await supabase
+    .from("pop_employees")
+    .select("id, left_at")
+    .eq("pop_id", popId)
+    .eq("user_id", memberUserId)
+    .maybeSingle()
+
+  if (employeeErr) return { success: false, error: employeeErr.message, status: 500 }
+  if (employee?.left_at) {
+    return {
+      success: false,
+      error: "Primero volvé a cargar a esa persona al equipo.",
+      status: 400,
+    }
+  }
+
+  const { error } = await supabase
+    .from("user_pop_roles")
+    .update({ is_active: true, updated_at: new Date().toISOString() })
+    .eq("id", membership.id)
 
   if (error) return { success: false, error: error.message, status: 500 }
   return { success: true }

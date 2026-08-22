@@ -19,6 +19,7 @@ import {
   createInvitation,
   deactivateMember,
   deleteInactiveMember,
+  reactivateMember,
   renewInvitation,
   revokeInvitation,
   updateMemberRole,
@@ -222,6 +223,7 @@ hrRoutes.post(
       sidecar.popSiteId,
       employeeId.data,
       body.data.day,
+      body.data.kind,
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -385,6 +387,27 @@ hrRoutes.post("/members/:userId/deactivate", requireAnyPermission(HR_WRITE), asy
     .eq("id", c.get("sidecar").popId)
     .maybeSingle()
   const result = await deactivateMember(
+    c.get("supabase"),
+    c.get("sidecar").popId,
+    typeof pop?.owner_user_id === "string" ? pop.owner_user_id : null,
+    userId.data,
+  )
+  if (!result.success) return c.json(result, result.status)
+  return c.json(result)
+})
+
+hrRoutes.post("/members/:userId/reactivate", requireAnyPermission(HR_WRITE), async (c) => {
+  const userId = idSchema.safeParse(c.req.param("userId"))
+  if (!userId.success) {
+    return c.json({ success: false, error: "Miembro inválido" }, 400)
+  }
+  const { data: pop } = await c
+    .get("supabase")
+    .from("pops")
+    .select("owner_user_id")
+    .eq("id", c.get("sidecar").popId)
+    .maybeSingle()
+  const result = await reactivateMember(
     c.get("supabase"),
     c.get("sidecar").popId,
     typeof pop?.owner_user_id === "string" ? pop.owner_user_id : null,
