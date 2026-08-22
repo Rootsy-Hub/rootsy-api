@@ -241,6 +241,8 @@ export async function layoutCategories(
       .update({
         sort_order: u.sortOrder,
         show_in_sale: u.showInSale,
+        // El ojo de Artículos aplica a Vender, Mostrador y Mesas.
+        show_in_menu: u.showInSale,
         updated_at: new Date().toISOString(),
       })
       .eq("id", u.id)
