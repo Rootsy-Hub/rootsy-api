@@ -214,8 +214,8 @@ async function stockOnHandByArticleIds(
   if (articleIds.length === 0) return out
 
   const { data, error } = await supabase
-    .from("inventory_movements")
-    .select("article_id, quantity_delta")
+    .from("inventory_on_hand")
+    .select("article_id, quantity")
     .eq("pop_id", popId)
     .in("article_id", articleIds)
 
@@ -223,7 +223,7 @@ async function stockOnHandByArticleIds(
 
   for (const row of data ?? []) {
     const id = String(row.article_id)
-    out.set(id, (out.get(id) ?? 0) + parseStockQty(row.quantity_delta))
+    out.set(id, (out.get(id) ?? 0) + parseStockQty(row.quantity))
   }
   for (const [id, qty] of out) {
     out.set(id, Math.round(qty * 1e6) / 1e6)
@@ -237,15 +237,15 @@ async function stockOnHandForPop(
 ): Promise<Map<string, number>> {
   const out = new Map<string, number>()
   const { data, error } = await supabase
-    .from("inventory_movements")
-    .select("article_id, quantity_delta")
+    .from("inventory_on_hand")
+    .select("article_id, quantity")
     .eq("pop_id", popId)
 
   if (error) return out
 
   for (const row of data ?? []) {
     const id = String(row.article_id)
-    out.set(id, (out.get(id) ?? 0) + parseStockQty(row.quantity_delta))
+    out.set(id, (out.get(id) ?? 0) + parseStockQty(row.quantity))
   }
   for (const [id, qty] of out) {
     out.set(id, Math.round(qty * 1e6) / 1e6)

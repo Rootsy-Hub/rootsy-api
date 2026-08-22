@@ -17,8 +17,10 @@ export function buildInventoryLocationRows(input: {
     let absOnHand = 0
     for (const [key, qty] of input.onHandByKey) {
       if (!key.startsWith(`${loc.id}:`)) continue
-      if (Math.abs(qty) > 1e-6) {
+      if (qty > 1e-6) {
         articleCount += 1
+      }
+      if (Math.abs(qty) > 1e-6) {
         absOnHand += Math.abs(qty)
       }
     }
@@ -94,8 +96,8 @@ export async function sumInventoryOnHandForArticle(
   { success: true; onHand: number } | { success: false; error: string }
 > {
   let query = supabase
-    .from("inventory_movements")
-    .select("quantity_delta")
+    .from("inventory_on_hand")
+    .select("quantity")
     .eq("pop_id", popId)
     .eq("article_id", articleId)
   if (locationId) {
@@ -107,7 +109,7 @@ export async function sumInventoryOnHandForArticle(
   }
   let t = 0
   for (const r of rows || []) {
-    t += parseQty(r.quantity_delta)
+    t += parseQty(r.quantity)
   }
   return { success: true, onHand: Math.round(t * 1e6) / 1e6 }
 }

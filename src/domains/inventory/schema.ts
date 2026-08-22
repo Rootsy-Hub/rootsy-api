@@ -59,8 +59,7 @@ export type InventoryExpirySummary = {
   total: number
 }
 
-export type InventoryListData = {
-  articleRows: InventoryArticleRow[]
+export type InventorySummaryData = {
   metrics: InventoryMetrics
   locations: InventoryLocationSlim[]
   expiry: InventoryExpirySummary
@@ -121,6 +120,83 @@ export type InventoryArticleSearchHit = {
 export const searchArticlesQuerySchema = z.object({
   q: z.string().trim().max(80).optional().default(""),
 })
+
+export const INVENTORY_ROW_VIEWS = [
+  "pantry",
+  "red",
+  "overstock",
+  "purchase",
+  "recommend",
+] as const
+
+export const listRowsQuerySchema = z.object({
+  view: z.enum(INVENTORY_ROW_VIEWS),
+  q: z.string().trim().max(80).optional().default(""),
+  page: z.coerce.number().int().min(1).optional().default(1),
+  pageSize: z.coerce.number().int().min(1).max(50).optional().default(25),
+  attention: z.enum(["negative", "empty", "below_min"]).optional(),
+})
+
+export type ListRowsQuery = z.infer<typeof listRowsQuerySchema>
+
+export type InventoryRowsData = {
+  rows: InventoryArticleRow[]
+  total: number
+  page: number
+  pageSize: number
+}
+
+export const listMovementsQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).optional().default(1),
+  pageSize: z.coerce.number().int().min(1).max(50).optional().default(25),
+})
+
+export type ListMovementsQuery = z.infer<typeof listMovementsQuerySchema>
+
+export type InventoryMovementsData = {
+  movements: InventoryMovementRow[]
+  page: number
+  pageSize: number
+  hasMore: boolean
+}
+
+export const listLedgerQuerySchema = z.object({
+  kind: z.enum(["layers", "allocations"]),
+  page: z.coerce.number().int().min(1).optional().default(1),
+  pageSize: z.coerce.number().int().min(1).max(50).optional().default(25),
+})
+
+export type ListLedgerQuery = z.infer<typeof listLedgerQuerySchema>
+
+export type InventoryLedgerLayersData = {
+  costLayers: InventoryCostLayerRow[]
+  page: number
+  pageSize: number
+  hasMore: boolean
+}
+
+export type InventoryLedgerAllocationsData = {
+  layerAllocations: InventoryLayerAllocationRow[]
+  page: number
+  pageSize: number
+  hasMore: boolean
+}
+
+export const listExpiryQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).optional().default(1),
+  pageSize: z.coerce.number().int().min(1).max(50).optional().default(25),
+  q: z.string().trim().max(80).optional().default(""),
+  filter: z.enum(["alert", "dated", "none"]).optional().default("alert"),
+})
+
+export type ListExpiryQuery = z.infer<typeof listExpiryQuerySchema>
+
+export type InventoryExpiryData = {
+  costLayers: InventoryCostLayerRow[]
+  page: number
+  pageSize: number
+  hasMore: boolean
+}
 
 export const balanceQuerySchema = z.object({
   articleId: z.string().uuid(),

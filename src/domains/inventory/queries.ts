@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js"
 import { resolveArticleReferenceUnitCostsByArticleId } from "../recipes/articleReferenceCost.js"
+import { CHART_MERCADERIAS_CODES } from "./chart.js"
 import {
   inventoryExpiryAlert,
   parseInventoryExpiresAt,
@@ -16,13 +17,21 @@ import type {
   InventoryArticleSearchHit,
   InventoryCostLayerRow,
   InventoryExpirySummary,
+  InventoryExpiryData,
   InventoryLayerAllocationRow,
-  InventoryLedgerData,
-  InventoryListData,
+  InventoryLedgerAllocationsData,
+  InventoryLedgerLayersData,
   InventoryLocationRow,
   InventoryLocationSlim,
   InventoryMetrics,
   InventoryMovementRow,
+  InventoryMovementsData,
+  InventoryRowsData,
+  InventorySummaryData,
+  ListExpiryQuery,
+  ListLedgerQuery,
+  ListMovementsQuery,
+  ListRowsQuery,
 } from "./schema.js"
 import {
   INVENTORY_RECOMMENDATION_LOOKBACK_DAYS,
@@ -60,29 +69,190 @@ function emptyInventoryMetrics(): InventoryMetrics {
   }
 }
 
-function buildInventoryMetrics(rows: InventoryArticleRow[]): InventoryMetrics {
+function emptyExpiry(): InventoryExpirySummary {
+  return { expiredCount: 0, soonCount: 0, total: 0 }
+}
+
+async function loadSlimLocations(
+  supabase: SupabaseClient,
+  popId: string,
+): Promise<
+  | { success: true; locations: InventoryLocationSlim[] }
+  | { success: false; error: string }
+> {
+  const { data: locRows, error: locErr } = await supabase
+    .from("inventory_locations")
+    .select("id, name, is_default, is_sellable")
+    .eq("pop_id", popId)
+    .is("archived_at", null)
+    .order("sort_order", { ascending: true })
+    .order("name", { ascending: true })
+  if (locErr) {
+    return {
+      success: false,
+      error: locErr.message || "No se pudieron cargar los depósitos.",
+    }
+  }
+  return {
+    success: true,
+    locations: (locRows || []).map((row) => ({
+      id: String(row.id),
+      name: String(row.name ?? ""),
+      isDefault: Boolean(row.is_default),
+      isSellable: Boolean(row.is_sellable),
+    })),
+  }
+}
+
+async function loadExpirySummary(
+  supabase: SupabaseClient,
+  popId: string,
+  todayIso: string,
+): Promise<
+  { success: true; expiry: InventoryExpirySummary } | { success: false; error: string }
+> {
+  const { data: layerRows, error: layerErr } = await supabase
+    .from("inventory_cost_layers")
+    .select("expires_at, quantity_remaining")
+    .eq("pop_id", popId)
+    .gt("quantity_remaining", 0)
+  if (layerErr) {
+    return {
+      success: false,
+      error: layerErr.message || "No se pudieron leer vencimientos.",
+    }
+  }
+  const expiry = emptyExpiry()
+  for (const row of layerRows || []) {
+    if (parseQty(row.quantity_remaining) <= 1e-6) continue
+    const alert = inventoryExpiryAlert(
+      parseInventoryExpiresAt(row.expires_at),
+      todayIso,
+    )
+    if (alert === "expired") expiry.expiredCount += 1
+    else if (alert) expiry.soonCount += 1
+  }
+  expiry.total = expiry.expiredCount + expiry.soonCount
+  return { success: true, expiry }
+}
+
+async function merchandiseBookValue(
+  supabase: SupabaseClient,
+  popId: string,
+): Promise<
+  { success: true; value: number } | { success: false; error: string }
+> {
+  const { data: accounts, error: accErr } = await supabase
+    .from("accounting_chart_of_accounts")
+    .select("id")
+    .eq("pop_id", popId)
+    .in("code", [...CHART_MERCADERIAS_CODES])
+  if (accErr) {
+    return {
+      success: false,
+      error: accErr.message || "No se pudieron leer las cuentas de inventario.",
+    }
+  }
+  const accountIds = (accounts || [])
+    .map((row) => String(row.id))
+    .filter(Boolean)
+  if (accountIds.length === 0) return { success: true, value: 0 }
+
+  const { data: lines, error: lineErr } = await supabase
+    .from("accounting_entry_lines")
+    .select(
+      "debit_amount, credit_amount, accounting_entries!inner ( pop_id, status )",
+    )
+    .in("account_id", accountIds)
+    .eq("accounting_entries.pop_id", popId)
+    .eq("accounting_entries.status", "posted")
+  if (lineErr) {
+    return {
+      success: false,
+      error: lineErr.message || "No se pudo leer el saldo de mercaderías.",
+    }
+  }
+  let value = 0
+  for (const line of lines || []) {
+    value += parseQty(line.debit_amount) - parseQty(line.credit_amount)
+  }
+  return { success: true, value: roundMoney(value) }
+}
+
+export async function listInventorySummary(
+  supabase: SupabaseClient,
+  popId: string,
+  todayIso: string,
+): Promise<
+  | { success: true; data: InventorySummaryData }
+  | { success: false; error: string }
+> {
+  const [arts, onHand, book, locations, expiry] = await Promise.all([
+    supabase
+      .from("articles")
+      .select("id, min_stock_level, unit_of_measure")
+      .eq("pop_id", popId)
+      .eq("is_active", true),
+    supabase
+      .from("inventory_on_hand")
+      .select("article_id, quantity")
+      .eq("pop_id", popId),
+    merchandiseBookValue(supabase, popId),
+    loadSlimLocations(supabase, popId),
+    loadExpirySummary(supabase, popId, todayIso),
+  ])
+
+  if (arts.error) {
+    return {
+      success: false,
+      error: arts.error.message || "No se pudieron cargar artículos.",
+    }
+  }
+  if (onHand.error) {
+    return {
+      success: false,
+      error: onHand.error.message || "No se pudieron leer los saldos.",
+    }
+  }
+  if (!book.success) return book
+  if (!locations.success) return locations
+  if (!expiry.success) return expiry
+
+  const qtyByArticle = new Map<string, number>()
+  for (const row of onHand.data || []) {
+    const aid = String(row.article_id)
+    qtyByArticle.set(aid, (qtyByArticle.get(aid) ?? 0) + parseQty(row.quantity))
+  }
+
   const metrics = emptyInventoryMetrics()
-  metrics.articleCount = rows.length
+  metrics.articleCount = (arts.data || []).length
+  metrics.inventoryValue = book.value
   const byUnit = new Map<string, { quantity: number; articleCount: number }>()
-  for (const row of rows) {
-    if (row.onHand > 1e-6) {
+
+  for (const row of arts.data || []) {
+    const articleId = String(row.id)
+    const minRaw = row.min_stock_level
+    const minLevel =
+      minRaw != null && Number.isFinite(Number(minRaw)) ? Number(minRaw) : null
+    const onHandQty =
+      Math.round((qtyByArticle.get(articleId) ?? 0) * 1e6) / 1e6
+    const attention = classifyInventoryAttention(onHandQty, minLevel)
+    if (onHandQty > 1e-6) {
       metrics.articlesWithStock += 1
-      metrics.unitsInStock = roundMoney(metrics.unitsInStock + row.onHand)
-      metrics.inventoryValue = roundMoney(
-        metrics.inventoryValue + row.inventoryValue,
-      )
-      const unit = row.unitOfMeasure.trim() || "unidad"
+      metrics.unitsInStock = roundMoney(metrics.unitsInStock + onHandQty)
+      const unit = String(row.unit_of_measure ?? "").trim() || "unidad"
       const prev = byUnit.get(unit) ?? { quantity: 0, articleCount: 0 }
-      prev.quantity = Math.round((prev.quantity + row.onHand) * 1e6) / 1e6
+      prev.quantity = Math.round((prev.quantity + onHandQty) * 1e6) / 1e6
       prev.articleCount += 1
       byUnit.set(unit, prev)
     }
-    if (row.attention === "negative") metrics.negativeCount += 1
-    if (row.attention === "empty") metrics.emptyCount += 1
-    if (row.attention === "below_min") metrics.belowMinCount += 1
-    if (row.attention === "overstock") metrics.overstockCount += 1
-    if (row.qtyToBuy > 0) metrics.purchaseCount += 1
-    if (row.suggestedMin != null) metrics.recommendationCount += 1
+    if (attention === "negative") metrics.negativeCount += 1
+    if (attention === "empty") metrics.emptyCount += 1
+    if (attention === "below_min") metrics.belowMinCount += 1
+    if (attention === "overstock") metrics.overstockCount += 1
+    if (suggestedPurchaseQty(onHandQty, minLevel, null) > 0) {
+      metrics.purchaseCount += 1
+    }
   }
   metrics.redCount =
     metrics.negativeCount + metrics.emptyCount + metrics.belowMinCount
@@ -98,11 +268,15 @@ function buildInventoryMetrics(rows: InventoryArticleRow[]): InventoryMetrics {
       if (orderA !== orderB) return orderA - orderB
       return a.unitOfMeasure.localeCompare(b.unitOfMeasure, "es")
     })
-  return metrics
-}
 
-function emptyExpiry(): InventoryExpirySummary {
-  return { expiredCount: 0, soonCount: 0, total: 0 }
+  return {
+    success: true,
+    data: {
+      metrics,
+      locations: locations.locations,
+      expiry: expiry.expiry,
+    },
+  }
 }
 
 async function buildArticleRows(
@@ -132,8 +306,8 @@ async function buildArticleRows(
   )
 
   const { data: sumRows, error: sumErr } = await supabase
-    .from("inventory_movements")
-    .select("article_id, quantity_delta")
+    .from("inventory_on_hand")
+    .select("article_id, quantity")
     .eq("pop_id", popId)
   if (sumErr) {
     return {
@@ -144,7 +318,7 @@ async function buildArticleRows(
   const deltaByArticle = new Map<string, number>()
   for (const r of sumRows || []) {
     const aid = String(r.article_id)
-    deltaByArticle.set(aid, (deltaByArticle.get(aid) ?? 0) + parseQty(r.quantity_delta))
+    deltaByArticle.set(aid, (deltaByArticle.get(aid) ?? 0) + parseQty(r.quantity))
   }
 
   const since = new Date()
@@ -199,66 +373,253 @@ async function buildArticleRows(
   return { success: true, articleRows }
 }
 
-export async function listInventory(
+function escapeIlike(raw: string): string {
+  return raw.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_")
+}
+
+function isRedAttention(
+  attention: InventoryArticleRow["attention"],
+): boolean {
+  return (
+    attention === "negative" ||
+    attention === "empty" ||
+    attention === "below_min"
+  )
+}
+
+async function attachPageCosts(
   supabase: SupabaseClient,
   popId: string,
-  todayIso: string,
+  pageRows: InventoryArticleRow[],
+) {
+  const costs = await resolveArticleReferenceUnitCostsByArticleId(
+    supabase,
+    popId,
+    pageRows.map((row) => row.articleId),
+  )
+  for (const row of pageRows) {
+    const unitCost = costs.get(row.articleId) ?? 0
+    row.unitCost = unitCost
+    row.inventoryValue = roundMoney(Math.max(0, row.onHand) * unitCost)
+  }
+}
+
+export async function listInventoryRows(
+  supabase: SupabaseClient,
+  popId: string,
+  input: ListRowsQuery,
 ): Promise<
-  { success: true; data: InventoryListData } | { success: false; error: string }
+  { success: true; data: InventoryRowsData } | { success: false; error: string }
 > {
-  const built = await buildArticleRows(supabase, popId)
-  if (!built.success) return built
+  const q = input.q.trim().replace(/,/g, " ").trim()
+  if (input.view === "pantry") {
+    const start = (input.page - 1) * input.pageSize
+    const end = start + input.pageSize - 1
+    const like = q.length >= 1 ? `%${escapeIlike(q)}%` : null
+    let countQuery = supabase
+      .from("articles")
+      .select("id", { count: "exact", head: true })
+      .eq("pop_id", popId)
+      .eq("is_active", true)
+    let pageQuery = supabase
+      .from("articles")
+      .select("id, name, min_stock_level, unit_of_measure")
+      .eq("pop_id", popId)
+      .eq("is_active", true)
+      .order("name", { ascending: true })
+      .range(start, end)
+    if (like) {
+      countQuery = countQuery.ilike("name", like)
+      pageQuery = pageQuery.ilike("name", like)
+    }
+    const [{ count, error: countErr }, { data: artRows, error: artErr }] =
+      await Promise.all([countQuery, pageQuery])
+    if (countErr) {
+      return {
+        success: false,
+        error: countErr.message || "No se pudieron contar artículos.",
+      }
+    }
+    if (artErr) {
+      return {
+        success: false,
+        error: artErr.message || "No se pudieron cargar artículos.",
+      }
+    }
+    const pageArticles = artRows || []
+    const ids = pageArticles.map((row) => String(row.id))
+    const qtyByArticle = new Map<string, number>()
+    if (ids.length > 0) {
+      const { data: onHandRows, error: onHandErr } = await supabase
+        .from("inventory_on_hand")
+        .select("article_id, quantity")
+        .eq("pop_id", popId)
+        .in("article_id", ids)
+      if (onHandErr) {
+        return {
+          success: false,
+          error: onHandErr.message || "No se pudieron leer los saldos.",
+        }
+      }
+      for (const row of onHandRows || []) {
+        const aid = String(row.article_id)
+        qtyByArticle.set(
+          aid,
+          (qtyByArticle.get(aid) ?? 0) + parseQty(row.quantity),
+        )
+      }
+    }
+    const pageRows: InventoryArticleRow[] = pageArticles.map((row) => {
+      const articleId = String(row.id)
+      const minRaw = row.min_stock_level
+      const minLevel =
+        minRaw != null && Number.isFinite(Number(minRaw))
+          ? Number(minRaw)
+          : null
+      const onHand = Math.round((qtyByArticle.get(articleId) ?? 0) * 1e6) / 1e6
+      const attention = classifyInventoryAttention(onHand, minLevel)
+      return {
+        articleId,
+        name: String(row.name ?? ""),
+        unitOfMeasure: String(row.unit_of_measure ?? ""),
+        onHand,
+        minLevel,
+        unitCost: 0,
+        inventoryValue: 0,
+        attention,
+        suggestedMin: null,
+        suggestedMax: suggestedMaxFromMin(minLevel),
+        qtyToBuy: suggestedPurchaseQty(onHand, minLevel, null),
+      }
+    })
+    await attachPageCosts(supabase, popId, pageRows)
+    return {
+      success: true,
+      data: {
+        rows: pageRows,
+        total: count ?? 0,
+        page: input.page,
+        pageSize: input.pageSize,
+      },
+    }
+  }
 
-  const { data: locRows, error: locErr } = await supabase
-    .from("inventory_locations")
-    .select("id, name, is_default, is_sellable")
+  let articlesQuery = supabase
+    .from("articles")
+    .select("id, name, min_stock_level, unit_of_measure")
     .eq("pop_id", popId)
-    .is("archived_at", null)
-    .order("sort_order", { ascending: true })
+    .eq("is_active", true)
     .order("name", { ascending: true })
-  if (locErr) {
+  if (q.length >= 1) {
+    articlesQuery = articlesQuery.ilike("name", `%${escapeIlike(q)}%`)
+  }
+  const [{ data: artRows, error: artErr }, { data: onHandRows, error: onHandErr }] =
+    await Promise.all([
+      articlesQuery,
+      supabase
+        .from("inventory_on_hand")
+        .select("article_id, quantity")
+        .eq("pop_id", popId),
+    ])
+  if (artErr) {
     return {
       success: false,
-      error: locErr.message || "No se pudieron cargar los depósitos.",
+      error: artErr.message || "No se pudieron cargar artículos.",
     }
   }
-  const locations: InventoryLocationSlim[] = (locRows || []).map((row) => ({
-    id: String(row.id),
-    name: String(row.name ?? ""),
-    isDefault: Boolean(row.is_default),
-    isSellable: Boolean(row.is_sellable),
-  }))
+  if (onHandErr) {
+    return {
+      success: false,
+      error: onHandErr.message || "No se pudieron leer los saldos.",
+    }
+  }
 
-  const { data: layerRows, error: layerErr } = await supabase
-    .from("inventory_cost_layers")
-    .select("expires_at, quantity_remaining")
-    .eq("pop_id", popId)
-    .gt("quantity_remaining", 0)
-  if (layerErr) {
-    return {
-      success: false,
-      error: layerErr.message || "No se pudieron leer vencimientos.",
+  const qtyByArticle = new Map<string, number>()
+  for (const row of onHandRows || []) {
+    const aid = String(row.article_id)
+    qtyByArticle.set(aid, (qtyByArticle.get(aid) ?? 0) + parseQty(row.quantity))
+  }
+
+  const outflowByArticle = new Map<string, number>()
+  if (input.view === "recommend") {
+    const since = new Date()
+    since.setUTCDate(
+      since.getUTCDate() - INVENTORY_RECOMMENDATION_LOOKBACK_DAYS,
+    )
+    const { data: saleRows } = await supabase
+      .from("inventory_movements")
+      .select("article_id, quantity_delta")
+      .eq("pop_id", popId)
+      .eq("movement_type", "sale")
+      .gte("created_at", since.toISOString())
+    for (const row of saleRows || []) {
+      const aid = String(row.article_id)
+      outflowByArticle.set(
+        aid,
+        (outflowByArticle.get(aid) ?? 0) + Math.abs(parseQty(row.quantity_delta)),
+      )
     }
   }
-  const expiry = emptyExpiry()
-  for (const row of layerRows || []) {
-    if (parseQty(row.quantity_remaining) <= 1e-6) continue
-    const alert = inventoryExpiryAlert(
-      parseInventoryExpiresAt(row.expires_at),
-      todayIso,
-    )
-    if (alert === "expired") expiry.expiredCount += 1
-    else if (alert) expiry.soonCount += 1
+
+  let rows: InventoryArticleRow[] = (artRows || []).map((row) => {
+    const articleId = String(row.id)
+    const minRaw = row.min_stock_level
+    const minLevel =
+      minRaw != null && Number.isFinite(Number(minRaw)) ? Number(minRaw) : null
+    const onHand = Math.round((qtyByArticle.get(articleId) ?? 0) * 1e6) / 1e6
+    const attention = classifyInventoryAttention(onHand, minLevel)
+    const suggestedMin =
+      input.view === "recommend"
+        ? recommendMinFromDailyOutflow(
+            (outflowByArticle.get(articleId) ?? 0) /
+              INVENTORY_RECOMMENDATION_LOOKBACK_DAYS,
+            minLevel,
+            onHand,
+          )
+        : null
+    return {
+      articleId,
+      name: String(row.name ?? ""),
+      unitOfMeasure: String(row.unit_of_measure ?? ""),
+      onHand,
+      minLevel,
+      unitCost: 0,
+      inventoryValue: 0,
+      attention,
+      suggestedMin,
+      suggestedMax: suggestedMaxFromMin(suggestedMin ?? minLevel),
+      qtyToBuy: suggestedPurchaseQty(onHand, minLevel, suggestedMin),
+    }
+  })
+
+  if (input.view === "red") {
+    rows = rows.filter((row) => {
+      if (!isRedAttention(row.attention)) return false
+      if (!input.attention) return true
+      return row.attention === input.attention
+    })
+  } else if (input.view === "overstock") {
+    rows = rows.filter((row) => row.attention === "overstock")
+  } else if (input.view === "purchase") {
+    rows = rows
+      .filter((row) => row.qtyToBuy > 0)
+      .sort((a, b) => b.qtyToBuy - a.qtyToBuy)
+  } else if (input.view === "recommend") {
+    rows = rows.filter((row) => row.suggestedMin != null)
   }
-  expiry.total = expiry.expiredCount + expiry.soonCount
+
+  const total = rows.length
+  const start = (input.page - 1) * input.pageSize
+  const pageRows = rows.slice(start, start + input.pageSize)
+  await attachPageCosts(supabase, popId, pageRows)
 
   return {
     success: true,
     data: {
-      articleRows: built.articleRows,
-      metrics: buildInventoryMetrics(built.articleRows),
-      locations,
-      expiry,
+      rows: pageRows,
+      total,
+      page: input.page,
+      pageSize: input.pageSize,
     },
   }
 }
@@ -276,10 +637,12 @@ export async function listInventoryArticleRows(
 export async function listInventoryMovements(
   supabase: SupabaseClient,
   popId: string,
+  input: ListMovementsQuery,
 ): Promise<
-  | { success: true; data: { movements: InventoryMovementRow[] } }
+  | { success: true; data: InventoryMovementsData }
   | { success: false; error: string }
 > {
+  const start = (input.page - 1) * input.pageSize
   const { data: movRows, error: movErr } = await supabase
     .from("inventory_movements")
     .select(
@@ -296,93 +659,153 @@ export async function listInventoryMovements(
     )
     .eq("pop_id", popId)
     .order("created_at", { ascending: false })
-    .limit(250)
+    .order("id", { ascending: false })
+    .range(start, start + input.pageSize)
   if (movErr) {
     return {
       success: false,
       error: movErr.message || "No se pudieron cargar movimientos.",
     }
   }
-  const movements: InventoryMovementRow[] = (movRows || []).map((r) => {
-    const art = r.articles as unknown as { name?: string } | null
-    const aid = String(r.article_id)
-    return {
-      id: String(r.id),
-      articleId: aid,
-      articleName: art?.name ? String(art.name) : aid,
-      quantityDelta: parseQty(r.quantity_delta),
-      movementType: String(r.movement_type ?? ""),
-      note: r.note != null ? String(r.note) : "",
-      createdAt: String(r.created_at ?? ""),
-      createdBy: r.created_by != null ? String(r.created_by) : null,
-    }
-  })
-  return { success: true, data: { movements } }
+  const fetched = movRows || []
+  const hasMore = fetched.length > input.pageSize
+  const movements: InventoryMovementRow[] = fetched
+    .slice(0, input.pageSize)
+    .map((r) => {
+      const art = r.articles as unknown as { name?: string } | null
+      const aid = String(r.article_id)
+      return {
+        id: String(r.id),
+        articleId: aid,
+        articleName: art?.name ? String(art.name) : aid,
+        quantityDelta: parseQty(r.quantity_delta),
+        movementType: String(r.movement_type ?? ""),
+        note: r.note != null ? String(r.note) : "",
+        createdAt: String(r.created_at ?? ""),
+        createdBy: r.created_by != null ? String(r.created_by) : null,
+      }
+    })
+  return {
+    success: true,
+    data: {
+      movements,
+      page: input.page,
+      pageSize: input.pageSize,
+      hasMore,
+    },
+  }
 }
 
-export async function listInventoryLedger(
+const COST_LAYER_SELECT = `
+  id,
+  article_id,
+  source_movement_id,
+  quantity_received,
+  quantity_remaining,
+  unit_cost,
+  received_at,
+  expires_at,
+  location_id,
+  articles ( name, unit_of_measure )
+`
+
+async function locationNameByIdMap(
   supabase: SupabaseClient,
   popId: string,
-): Promise<
-  { success: true; data: InventoryLedgerData } | { success: false; error: string }
-> {
+) {
   const { data: locRows } = await supabase
     .from("inventory_locations")
     .select("id, name")
     .eq("pop_id", popId)
-  const locationNameById = new Map(
+  return new Map(
     (locRows || []).map((row) => [String(row.id), String(row.name ?? "")]),
   )
+}
 
+function mapCostLayerRow(
+  r: Record<string, unknown>,
+  locationNameById: Map<string, string>,
+): InventoryCostLayerRow {
+  const art = r.articles as unknown as {
+    name?: string
+    unit_of_measure?: string
+  } | null
+  const aid = String(r.article_id)
+  const locId = r.location_id ? String(r.location_id) : ""
+  return {
+    id: String(r.id),
+    articleId: aid,
+    articleName: art?.name ? String(art.name) : aid,
+    sourceMovementId:
+      r.source_movement_id != null ? String(r.source_movement_id) : null,
+    quantityReceived: parseQty(r.quantity_received),
+    quantityRemaining: parseQty(r.quantity_remaining),
+    unitCost: parseQty(r.unit_cost),
+    receivedAt: String(r.received_at ?? ""),
+    expiresAt: parseInventoryExpiresAt(r.expires_at),
+    locationId: locId,
+    locationName: locationNameById.get(locId) || "Depósito",
+    unitOfMeasure:
+      art?.unit_of_measure != null ? String(art.unit_of_measure) : "",
+  }
+}
+
+function addDaysIso(todayIso: string, days: number): string {
+  const [year, month, day] = todayIso.split("-").map(Number)
+  const date = new Date(year, month - 1, day)
+  date.setDate(date.getDate() + days)
+  const y = date.getFullYear()
+  const m = String(date.getMonth() + 1).padStart(2, "0")
+  const d = String(date.getDate()).padStart(2, "0")
+  return `${y}-${m}-${d}`
+}
+
+export async function listInventoryLedgerLayers(
+  supabase: SupabaseClient,
+  popId: string,
+  input: Pick<ListLedgerQuery, "page" | "pageSize">,
+): Promise<
+  | { success: true; data: InventoryLedgerLayersData }
+  | { success: false; error: string }
+> {
+  const start = (input.page - 1) * input.pageSize
+  const locationNameById = await locationNameByIdMap(supabase, popId)
   const { data: layerRows, error: layerErr } = await supabase
     .from("inventory_cost_layers")
-    .select(
-      `
-        id,
-        article_id,
-        source_movement_id,
-        quantity_received,
-        quantity_remaining,
-        unit_cost,
-        received_at,
-        expires_at,
-        location_id,
-        articles ( name, unit_of_measure )
-      `,
-    )
+    .select(COST_LAYER_SELECT)
     .eq("pop_id", popId)
     .order("received_at", { ascending: true })
+    .order("id", { ascending: true })
+    .range(start, start + input.pageSize)
   if (layerErr) {
     return {
       success: false,
       error: layerErr.message || "No se pudieron cargar capas de costo.",
     }
   }
-  const costLayers: InventoryCostLayerRow[] = (layerRows || []).map((r) => {
-    const art = r.articles as unknown as {
-      name?: string
-      unit_of_measure?: string
-    } | null
-    const aid = String(r.article_id)
-    const locId = r.location_id ? String(r.location_id) : ""
-    return {
-      id: String(r.id),
-      articleId: aid,
-      articleName: art?.name ? String(art.name) : aid,
-      sourceMovementId:
-        r.source_movement_id != null ? String(r.source_movement_id) : null,
-      quantityReceived: parseQty(r.quantity_received),
-      quantityRemaining: parseQty(r.quantity_remaining),
-      unitCost: parseQty(r.unit_cost),
-      receivedAt: String(r.received_at ?? ""),
-      expiresAt: parseInventoryExpiresAt(r.expires_at),
-      locationId: locId,
-      locationName: locationNameById.get(locId) || "Depósito",
-      unitOfMeasure:
-        art?.unit_of_measure != null ? String(art.unit_of_measure) : "",
-    }
-  })
+  const fetched = layerRows || []
+  return {
+    success: true,
+    data: {
+      costLayers: fetched
+        .slice(0, input.pageSize)
+        .map((row) => mapCostLayerRow(row, locationNameById)),
+      page: input.page,
+      pageSize: input.pageSize,
+      hasMore: fetched.length > input.pageSize,
+    },
+  }
+}
 
+export async function listInventoryLedgerAllocations(
+  supabase: SupabaseClient,
+  popId: string,
+  input: Pick<ListLedgerQuery, "page" | "pageSize">,
+): Promise<
+  | { success: true; data: InventoryLedgerAllocationsData }
+  | { success: false; error: string }
+> {
+  const start = (input.page - 1) * input.pageSize
   const { data: allocRows, error: allocErr } = await supabase
     .from("inventory_layer_allocations")
     .select(
@@ -400,15 +823,18 @@ export async function listInventoryLedger(
     )
     .eq("pop_id", popId)
     .order("created_at", { ascending: false })
-    .limit(150)
+    .order("id", { ascending: false })
+    .range(start, start + input.pageSize)
   if (allocErr) {
     return {
       success: false,
       error: allocErr.message || "No se pudieron cargar imputaciones FIFO.",
     }
   }
-  const layerAllocations: InventoryLayerAllocationRow[] = (allocRows || []).map(
-    (r) => {
+  const fetched = allocRows || []
+  const layerAllocations: InventoryLayerAllocationRow[] = fetched
+    .slice(0, input.pageSize)
+    .map((r) => {
       const art = r.articles as unknown as { name?: string } | null
       const mov = r.inventory_movements as unknown as {
         movement_type?: string
@@ -428,10 +854,114 @@ export async function listInventoryLedger(
         lineCost: Math.round(q * uc * 1e6) / 1e6,
         createdAt: String(r.created_at ?? ""),
       }
+    })
+  return {
+    success: true,
+    data: {
+      layerAllocations,
+      page: input.page,
+      pageSize: input.pageSize,
+      hasMore: fetched.length > input.pageSize,
     },
-  )
+  }
+}
 
-  return { success: true, data: { costLayers, layerAllocations } }
+export async function listInventoryExpiryLayers(
+  supabase: SupabaseClient,
+  popId: string,
+  input: ListExpiryQuery,
+  todayIso: string,
+): Promise<
+  | { success: true; data: InventoryExpiryData }
+  | { success: false; error: string }
+> {
+  const start = (input.page - 1) * input.pageSize
+  const q = input.q.trim().replace(/,/g, " ").trim()
+  const locationNameById = await locationNameByIdMap(supabase, popId)
+
+  let articleIds: string[] | null = null
+  let locationIds: string[] | null = null
+  if (q.length >= 1) {
+    const like = `%${escapeIlike(q)}%`
+    const [{ data: artHits }, { data: locHits }] = await Promise.all([
+      supabase
+        .from("articles")
+        .select("id")
+        .eq("pop_id", popId)
+        .ilike("name", like),
+      supabase
+        .from("inventory_locations")
+        .select("id")
+        .eq("pop_id", popId)
+        .ilike("name", like),
+    ])
+    articleIds = (artHits || []).map((row) => String(row.id))
+    locationIds = (locHits || []).map((row) => String(row.id))
+    if (articleIds.length === 0 && locationIds.length === 0) {
+      return {
+        success: true,
+        data: {
+          costLayers: [],
+          page: input.page,
+          pageSize: input.pageSize,
+          hasMore: false,
+        },
+      }
+    }
+  }
+
+  let layersQuery = supabase
+    .from("inventory_cost_layers")
+    .select(COST_LAYER_SELECT)
+    .eq("pop_id", popId)
+    .gt("quantity_remaining", 0)
+    .order("expires_at", { ascending: true, nullsFirst: false })
+    .order("received_at", { ascending: true })
+    .order("id", { ascending: true })
+
+  if (input.filter === "none") {
+    layersQuery = layersQuery.is("expires_at", null)
+  } else if (input.filter === "dated") {
+    layersQuery = layersQuery.not("expires_at", "is", null)
+  } else {
+    layersQuery = layersQuery
+      .not("expires_at", "is", null)
+      .lte("expires_at", addDaysIso(todayIso, 30))
+  }
+
+  if (articleIds && locationIds) {
+    const parts: string[] = []
+    if (articleIds.length > 0) {
+      parts.push(`article_id.in.(${articleIds.join(",")})`)
+    }
+    if (locationIds.length > 0) {
+      parts.push(`location_id.in.(${locationIds.join(",")})`)
+    }
+    layersQuery = layersQuery.or(parts.join(","))
+  }
+
+  const { data: layerRows, error: layerErr } = await layersQuery.range(
+    start,
+    start + input.pageSize,
+  )
+  if (layerErr) {
+    return {
+      success: false,
+      error: layerErr.message || "No se pudieron cargar vencimientos.",
+    }
+  }
+  const fetched = layerRows || []
+  return {
+    success: true,
+    data: {
+      costLayers: fetched
+        .slice(0, input.pageSize)
+        .map((row) => mapCostLayerRow(row, locationNameById)),
+      page: input.page,
+      pageSize: input.pageSize,
+      hasMore: fetched.length > input.pageSize,
+    },
+  }
 }
 
 export async function listInventoryLocations(
@@ -456,8 +986,8 @@ export async function listInventoryLocations(
   }
 
   const { data: sumRows, error: sumErr } = await supabase
-    .from("inventory_movements")
-    .select("article_id, location_id, quantity_delta")
+    .from("inventory_on_hand")
+    .select("article_id, location_id, quantity")
     .eq("pop_id", popId)
   if (sumErr) {
     return {
@@ -470,10 +1000,7 @@ export async function listInventoryLocations(
     const locId = r.location_id ? String(r.location_id) : ""
     if (!locId) continue
     const key = `${locId}:${String(r.article_id)}`
-    onHandByLocationArticle.set(
-      key,
-      (onHandByLocationArticle.get(key) ?? 0) + parseQty(r.quantity_delta),
-    )
+    onHandByLocationArticle.set(key, parseQty(r.quantity))
   }
 
   const { data: layerRows, error: layerErr } = await supabase

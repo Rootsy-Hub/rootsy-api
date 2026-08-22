@@ -25,10 +25,13 @@ import {
 } from "./mutations.js"
 import {
   getArticleInventoryBalance,
-  listInventory,
-  listInventoryLedger,
+  listInventoryExpiryLayers,
+  listInventoryLedgerAllocations,
+  listInventoryLedgerLayers,
   listInventoryLocations,
   listInventoryMovements,
+  listInventoryRows,
+  listInventorySummary,
   searchInventoryArticles,
 } from "./queries.js"
 import {
@@ -36,6 +39,10 @@ import {
   balanceQuerySchema,
   createAdjustmentBodySchema,
   createLocationBodySchema,
+  listExpiryQuerySchema,
+  listLedgerQuerySchema,
+  listMovementsQuerySchema,
+  listRowsQuerySchema,
   renameLocationBodySchema,
   searchArticlesQuerySchema,
   setExpiryBodySchema,
@@ -47,23 +54,91 @@ const idSchema = z.string().uuid()
 
 export const inventoryRoutes = new Hono<SidecarEnv>()
 
-inventoryRoutes.get("/", requireAnyPermission(INVENTORY_READ), async (c) => {
-  const sidecar = c.get("sidecar")
-  const todayIso = entryDateIsoInTimezone(
-    timezoneForPopLedger(null, sidecar.popSiteId),
-  )
-  const result = await listInventory(c.get("supabase"), sidecar.popId, todayIso)
-  if (!result.success) return c.json(result, 500)
-  return c.json(result)
-})
+inventoryRoutes.get(
+  "/rows",
+  requireAnyPermission(INVENTORY_READ),
+  async (c) => {
+    const parsed = listRowsQuerySchema.safeParse({
+      view: c.req.query("view") || undefined,
+      q: c.req.query("q") || undefined,
+      page: c.req.query("page") || undefined,
+      pageSize: c.req.query("pageSize") || undefined,
+      attention: c.req.query("attention") || undefined,
+    })
+    if (!parsed.success) {
+      return c.json({ success: false, error: "Parámetros inválidos" }, 400)
+    }
+    const result = await listInventoryRows(
+      c.get("supabase"),
+      c.get("sidecar").popId,
+      parsed.data,
+    )
+    if (!result.success) return c.json(result, 500)
+    return c.json(result)
+  },
+)
+
+inventoryRoutes.get(
+  "/expiry",
+  requireAnyPermission(INVENTORY_READ),
+  async (c) => {
+    const parsed = listExpiryQuerySchema.safeParse({
+      page: c.req.query("page") || undefined,
+      pageSize: c.req.query("pageSize") || undefined,
+      q: c.req.query("q") || undefined,
+      filter: c.req.query("filter") || undefined,
+    })
+    if (!parsed.success) {
+      return c.json({ success: false, error: "Parámetros inválidos" }, 400)
+    }
+    const sidecar = c.get("sidecar")
+    const todayIso = entryDateIsoInTimezone(
+      timezoneForPopLedger(null, sidecar.popSiteId),
+    )
+    const result = await listInventoryExpiryLayers(
+      c.get("supabase"),
+      sidecar.popId,
+      parsed.data,
+      todayIso,
+    )
+    if (!result.success) return c.json(result, 500)
+    return c.json(result)
+  },
+)
+
+inventoryRoutes.get(
+  "/summary",
+  requireAnyPermission(INVENTORY_READ),
+  async (c) => {
+    const sidecar = c.get("sidecar")
+    const todayIso = entryDateIsoInTimezone(
+      timezoneForPopLedger(null, sidecar.popSiteId),
+    )
+    const result = await listInventorySummary(
+      c.get("supabase"),
+      sidecar.popId,
+      todayIso,
+    )
+    if (!result.success) return c.json(result, 500)
+    return c.json(result)
+  },
+)
 
 inventoryRoutes.get(
   "/movements",
   requireAnyPermission(INVENTORY_READ),
   async (c) => {
+    const parsed = listMovementsQuerySchema.safeParse({
+      page: c.req.query("page") || undefined,
+      pageSize: c.req.query("pageSize") || undefined,
+    })
+    if (!parsed.success) {
+      return c.json({ success: false, error: "Parámetros inválidos" }, 400)
+    }
     const result = await listInventoryMovements(
       c.get("supabase"),
       c.get("sidecar").popId,
+      parsed.data,
     )
     if (!result.success) return c.json(result, 500)
     return c.json(result)
@@ -71,10 +146,26 @@ inventoryRoutes.get(
 )
 
 inventoryRoutes.get("/ledger", requireAnyPermission(INVENTORY_READ), async (c) => {
-  const result = await listInventoryLedger(
-    c.get("supabase"),
-    c.get("sidecar").popId,
-  )
+  const parsed = listLedgerQuerySchema.safeParse({
+    kind: c.req.query("kind") || undefined,
+    page: c.req.query("page") || undefined,
+    pageSize: c.req.query("pageSize") || undefined,
+  })
+  if (!parsed.success) {
+    return c.json({ success: false, error: "Parámetros inválidos" }, 400)
+  }
+  const result =
+    parsed.data.kind === "allocations"
+      ? await listInventoryLedgerAllocations(
+          c.get("supabase"),
+          c.get("sidecar").popId,
+          parsed.data,
+        )
+      : await listInventoryLedgerLayers(
+          c.get("supabase"),
+          c.get("sidecar").popId,
+          parsed.data,
+        )
   if (!result.success) return c.json(result, 500)
   return c.json(result)
 })
