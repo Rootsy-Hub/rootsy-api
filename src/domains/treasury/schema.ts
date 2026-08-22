@@ -226,3 +226,116 @@ export type TreasuryAccountMovementsData = {
     statementTotalOut: number
   }
 }
+
+const isoDateRequired = z
+  .string()
+  .trim()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, "Fecha inválida.")
+
+export const statementImportBodySchema = z.object({
+  csvText: z.string().min(1, "El CSV está vacío."),
+})
+
+export const statementLineBodySchema = z.object({
+  lineDate: isoDateRequired,
+  description: z.string().trim().optional(),
+  amount: z.number().positive("El importe debe ser mayor a cero."),
+  direction: z.enum(["in", "out"]),
+})
+
+export const reconciliationMarkBodySchema = z.object({
+  movementKind: z.enum(["sale", "purchase", "expense", "funding_out"]),
+  movementRefId: z.string().trim().min(1, "Referencia de movimiento inválida."),
+  statementLineId: z.string().uuid().nullable().optional(),
+})
+
+export const clearReconciliationMarkBodySchema = z.object({
+  movementKind: z.enum([
+    "sale",
+    "purchase",
+    "expense",
+    "funding_out",
+    "card_settlement",
+    "cash_register_close",
+    "pos_liquidation",
+    "pos_liquidation_fee",
+  ]),
+  movementRefId: z.string().trim().min(1, "Referencia de movimiento inválida."),
+})
+
+export const settlementBodySchema = z.object({
+  cardTreasuryAccountId: z.string().uuid(),
+  fundingTreasuryAccountId: z.string().uuid(),
+  principalAmount: z.number().positive("El importe debe ser mayor a cero."),
+  adjustmentAmount: z.number().min(0).optional(),
+  settledAt: isoDateRequired,
+  notes: z.string().optional(),
+})
+
+export const posAcreditationBodySchema = z.object({
+  posTreasuryAccountId: z.string().uuid(),
+  motherTreasuryAccountId: z.string().uuid().optional(),
+  principalAmount: z.number().positive("El importe debe ser mayor a cero."),
+  adjustmentAmount: z.number().min(0).optional(),
+  creditedAt: isoDateRequired,
+  notes: z.string().optional(),
+})
+
+export const childPendingQuerySchema = z.object({
+  asOf: isoDateRequired,
+  role: z.enum(["pos", "card_payable"]),
+})
+
+export const reconciliationHistoryQuerySchema = z.object({
+  from: isoDate,
+  to: isoDate,
+  child: z.string().uuid().optional(),
+  role: z.enum(["pos", "card_payable"]).optional(),
+})
+
+export type StatementImportBody = z.infer<typeof statementImportBodySchema>
+export type StatementLineBody = z.infer<typeof statementLineBodySchema>
+export type ReconciliationMarkBody = z.infer<typeof reconciliationMarkBodySchema>
+export type ClearReconciliationMarkBody = z.infer<
+  typeof clearReconciliationMarkBodySchema
+>
+export type SettlementBody = z.infer<typeof settlementBodySchema>
+export type PosAcreditationBody = z.infer<typeof posAcreditationBodySchema>
+
+export type TreasuryReconciliationEventRow = {
+  id: string
+  kind: "pos_acreditation" | "card_settlement" | "cash_register_close_adjustment"
+  eventDate: string
+  eventOccurredAt?: string
+  accountName: string
+  principalAmount: number
+  adjustmentAmount: number
+  totalAmount: number
+  notes: string
+  accountingEntryId: string | null
+  accountingEntryNumber: number | null
+  accountingEntryStatus: string | null
+  createdByName?: string | null
+}
+
+export type TreasuryPosSummaryMovementRow = {
+  id: string
+  kind:
+    | "pos_sale"
+    | "cash_register_close"
+    | "purchase_payment"
+    | "expense_payment"
+  date: string
+  amount: number
+  direction: "in" | "out"
+  label: string
+}
+
+export type TreasuryReconciliationHistoryData = {
+  events: TreasuryReconciliationEventRow[]
+  periodGrossAmount: number
+  periodPendingBalance: number
+  openingPendingBalance: number | null
+  periodToLiquidate: number
+  summaryMovements: TreasuryPosSummaryMovementRow[]
+}

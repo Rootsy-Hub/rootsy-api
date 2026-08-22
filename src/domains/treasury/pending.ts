@@ -56,7 +56,7 @@ async function computeSettledPrincipalAsOf(
   return total
 }
 
-async function computeChildPendingBalanceAsOf(
+export async function computeChildPendingBalanceAsOf(
   supabase: SupabaseClient,
   popId: string,
   childTreasuryAccountId: string,

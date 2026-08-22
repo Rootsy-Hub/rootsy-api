@@ -10,6 +10,7 @@ import { expenseRoutes } from "./domains/expenses/routes.js"
 import { priceListRoutes } from "./domains/price-lists/routes.js"
 import { comandaStationRoutes } from "./domains/comanda-stations/routes.js"
 import { recipeCategoryRoutes } from "./domains/recipe-categories/routes.js"
+import { printerRoutes } from "./domains/printers/routes.js"
 import { promotionRoutes } from "./domains/promotions/routes.js"
 import { recipeRoutes } from "./domains/recipes/routes.js"
 import { serviceCategoryRoutes } from "./domains/service-categories/routes.js"
@@ -72,6 +73,7 @@ export function createApp() {
   pop.route("/expense-categories", expenseCategoryRoutes)
   pop.route("/expenses", expenseRoutes)
   pop.route("/recipe-categories", recipeCategoryRoutes)
+  pop.route("/printers", printerRoutes)
   pop.route("/promotions", promotionRoutes)
   pop.route("/recipes", recipeRoutes)
   pop.route("/service-categories", serviceCategoryRoutes)

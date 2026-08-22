@@ -9,6 +9,11 @@ import {
   TREASURY_UPDATE,
 } from "./allowlist.js"
 import { getTreasuryAccountBalances } from "./balances.js"
+import { getTreasuryReconciliationHistory } from "./history.js"
+import {
+  clearMovementReconciliation,
+  setMovementReconciliation,
+} from "./marks.js"
 import { getTreasuryAccountMovements } from "./movements.js"
 import {
   createTreasuryAccount,
@@ -20,12 +25,30 @@ import {
 import { getTreasuryPeriodReport, getTreasuryPeriodTotals } from "./period.js"
 import { getTreasuryAccountPage, listTreasuryAccounts } from "./queries.js"
 import {
+  childPendingQuerySchema,
+  clearReconciliationMarkBodySchema,
   createTreasuryAccountBodySchema,
   createTreasuryChildBodySchema,
   periodQuerySchema,
+  posAcreditationBodySchema,
+  reconciliationHistoryQuerySchema,
+  reconciliationMarkBodySchema,
   setTreasuryAccountActiveBodySchema,
+  settlementBodySchema,
+  statementImportBodySchema,
+  statementLineBodySchema,
   updateTreasuryAccountBodySchema,
 } from "./schema.js"
+import {
+  getChildPendingBalance,
+  recordPosAcreditation,
+  recordTreasurySettlement,
+} from "./settlements.js"
+import {
+  addManualBankStatementLine,
+  deleteBankStatementLine,
+  importBankStatementCsv,
+} from "./statement.js"
 import { getTreasuryAccountTotals } from "./totals.js"
 
 export const treasuryRoutes = new Hono<SidecarEnv>()
@@ -45,6 +68,13 @@ function parseRelatedIds(raw: string | undefined): string[] {
     .split(",")
     .map((id) => id.trim())
     .filter((id) => accountIdSchema.safeParse(id).success)
+}
+
+function bodyError(issues: { message: string }[]) {
+  return {
+    success: false as const,
+    error: issues[0]?.message ?? "Body inválido",
+  }
 }
 
 treasuryRoutes.get(
@@ -173,6 +203,222 @@ treasuryRoutes.get(
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
+  },
+)
+
+treasuryRoutes.get(
+  "/:accountId/children/:childId/pending",
+  requireAnyPermission(TREASURY_READ),
+  async (c) => {
+    const accountId = accountIdSchema.safeParse(c.req.param("accountId"))
+    const childId = accountIdSchema.safeParse(c.req.param("childId"))
+    if (!accountId.success || !childId.success) {
+      return c.json({ success: false, error: "Cuenta inválida" }, 400)
+    }
+    const parsed = childPendingQuerySchema.safeParse({
+      asOf: c.req.query("asOf"),
+      role: c.req.query("role"),
+    })
+    if (!parsed.success) {
+      return c.json(bodyError(parsed.error.issues), 400)
+    }
+    const result = await getChildPendingBalance(
+      c.get("supabase"),
+      c.get("sidecar").popId,
+      childId.data,
+      parsed.data.role,
+      parsed.data.asOf,
+    )
+    return c.json(result)
+  },
+)
+
+treasuryRoutes.get(
+  "/:accountId/reconciliation",
+  requireAnyPermission(TREASURY_READ),
+  async (c) => {
+    const accountId = accountIdSchema.safeParse(c.req.param("accountId"))
+    if (!accountId.success) {
+      return c.json({ success: false, error: "Cuenta inválida" }, 400)
+    }
+    const parsed = reconciliationHistoryQuerySchema.safeParse({
+      from: c.req.query("from") || undefined,
+      to: c.req.query("to") || undefined,
+      child: c.req.query("child") || undefined,
+      role: c.req.query("role") || undefined,
+    })
+    if (!parsed.success) {
+      return c.json({ success: false, error: "Parámetros inválidos" }, 400)
+    }
+    const sidecar = c.get("sidecar")
+    const result = await getTreasuryReconciliationHistory(
+      c.get("supabase"),
+      sidecar.popId,
+      sidecar.popSiteId,
+      accountId.data,
+      {
+        childTreasuryAccountId: parsed.data.child,
+        childRole: parsed.data.role,
+        dateFrom: parsed.data.from,
+        dateTo: parsed.data.to,
+      },
+    )
+    if (!result.success) return c.json(result, result.status)
+    return c.json(result)
+  },
+)
+
+treasuryRoutes.post(
+  "/:accountId/statement/import",
+  requireAnyPermission(TREASURY_UPDATE),
+  async (c) => {
+    const accountId = accountIdSchema.safeParse(c.req.param("accountId"))
+    if (!accountId.success) {
+      return c.json({ success: false, error: "Cuenta inválida" }, 400)
+    }
+    const body = statementImportBodySchema.safeParse(
+      await c.req.json().catch(() => null),
+    )
+    if (!body.success) return c.json(bodyError(body.error.issues), 400)
+    const result = await importBankStatementCsv(
+      c.get("supabase"),
+      c.get("sidecar").popId,
+      c.get("userId"),
+      accountId.data,
+      body.data.csvText,
+    )
+    if (!result.success) return c.json(result, result.status)
+    return c.json(result)
+  },
+)
+
+treasuryRoutes.post(
+  "/:accountId/statement",
+  requireAnyPermission(TREASURY_UPDATE),
+  async (c) => {
+    const accountId = accountIdSchema.safeParse(c.req.param("accountId"))
+    if (!accountId.success) {
+      return c.json({ success: false, error: "Cuenta inválida" }, 400)
+    }
+    const body = statementLineBodySchema.safeParse(
+      await c.req.json().catch(() => null),
+    )
+    if (!body.success) return c.json(bodyError(body.error.issues), 400)
+    const result = await addManualBankStatementLine(
+      c.get("supabase"),
+      c.get("sidecar").popId,
+      c.get("userId"),
+      accountId.data,
+      body.data,
+    )
+    if (!result.success) return c.json(result, result.status)
+    return c.json(result, 201)
+  },
+)
+
+treasuryRoutes.delete(
+  "/:accountId/statement/:lineId",
+  requireAnyPermission(TREASURY_UPDATE),
+  async (c) => {
+    const accountId = accountIdSchema.safeParse(c.req.param("accountId"))
+    const lineId = accountIdSchema.safeParse(c.req.param("lineId"))
+    if (!accountId.success || !lineId.success) {
+      return c.json({ success: false, error: "Identificador inválido" }, 400)
+    }
+    const result = await deleteBankStatementLine(
+      c.get("supabase"),
+      c.get("sidecar").popId,
+      accountId.data,
+      lineId.data,
+    )
+    if (!result.success) return c.json(result, result.status)
+    return c.json(result)
+  },
+)
+
+treasuryRoutes.post(
+  "/:accountId/reconciliation-marks",
+  requireAnyPermission(TREASURY_UPDATE),
+  async (c) => {
+    const accountId = accountIdSchema.safeParse(c.req.param("accountId"))
+    if (!accountId.success) {
+      return c.json({ success: false, error: "Cuenta inválida" }, 400)
+    }
+    const body = reconciliationMarkBodySchema.safeParse(
+      await c.req.json().catch(() => null),
+    )
+    if (!body.success) return c.json(bodyError(body.error.issues), 400)
+    const result = await setMovementReconciliation(
+      c.get("supabase"),
+      c.get("sidecar").popId,
+      c.get("userId"),
+      accountId.data,
+      body.data,
+    )
+    if (!result.success) return c.json(result, result.status)
+    return c.json(result)
+  },
+)
+
+treasuryRoutes.delete(
+  "/:accountId/reconciliation-marks",
+  requireAnyPermission(TREASURY_UPDATE),
+  async (c) => {
+    const body = clearReconciliationMarkBodySchema.safeParse(
+      await c.req.json().catch(() => null),
+    )
+    if (!body.success) return c.json(bodyError(body.error.issues), 400)
+    const result = await clearMovementReconciliation(
+      c.get("supabase"),
+      c.get("sidecar").popId,
+      body.data.movementKind,
+      body.data.movementRefId,
+    )
+    if (!result.success) return c.json(result, result.status)
+    return c.json(result)
+  },
+)
+
+treasuryRoutes.post(
+  "/:accountId/settlements",
+  requireAnyPermission(TREASURY_UPDATE),
+  async (c) => {
+    const body = settlementBodySchema.safeParse(
+      await c.req.json().catch(() => null),
+    )
+    if (!body.success) return c.json(bodyError(body.error.issues), 400)
+    const result = await recordTreasurySettlement(
+      c.get("supabase"),
+      c.get("sidecar").popId,
+      c.get("userId"),
+      body.data,
+    )
+    if (!result.success) return c.json(result, result.status)
+    return c.json(result, 201)
+  },
+)
+
+treasuryRoutes.post(
+  "/:accountId/pos-acreditations",
+  requireAnyPermission(TREASURY_UPDATE),
+  async (c) => {
+    const accountId = accountIdSchema.safeParse(c.req.param("accountId"))
+    if (!accountId.success) {
+      return c.json({ success: false, error: "Cuenta inválida" }, 400)
+    }
+    const body = posAcreditationBodySchema.safeParse(
+      await c.req.json().catch(() => null),
+    )
+    if (!body.success) return c.json(bodyError(body.error.issues), 400)
+    const result = await recordPosAcreditation(
+      c.get("supabase"),
+      c.get("sidecar").popId,
+      c.get("userId"),
+      accountId.data,
+      body.data,
+    )
+    if (!result.success) return c.json(result, result.status)
+    return c.json(result, 201)
   },
 )
 
