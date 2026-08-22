@@ -15,11 +15,19 @@ const envSchema = z.object({
 
 export type Env = z.infer<typeof envSchema>
 
+export type EnvSource = Record<string, unknown>
+
 let cached: Env | null = null
 
-export function getEnv(): Env {
-  if (cached) return cached
-  const parsed = envSchema.safeParse(process.env)
+function withJwksFallback(data: Env): Env {
+  if (!data.SUPABASE_JWT_SECRET && !data.SUPABASE_JWKS_URL) {
+    data.SUPABASE_JWKS_URL = `${data.SUPABASE_URL.replace(/\/$/, "")}/auth/v1/.well-known/jwks.json`
+  }
+  return data
+}
+
+export function parseEnv(source: EnvSource): Env {
+  const parsed = envSchema.safeParse(source)
   if (!parsed.success) {
     const fields = parsed.error.issues
       .map((i) => i.path.join("."))
@@ -27,9 +35,18 @@ export function getEnv(): Env {
       .join(", ")
     throw new Error(`Env inválida: ${fields || parsed.error.message}`)
   }
-  if (!parsed.data.SUPABASE_JWT_SECRET && !parsed.data.SUPABASE_JWKS_URL) {
-    parsed.data.SUPABASE_JWKS_URL = `${parsed.data.SUPABASE_URL.replace(/\/$/, "")}/auth/v1/.well-known/jwks.json`
-  }
-  cached = parsed.data
+  return withJwksFallback(parsed.data)
+}
+
+export function initEnv(source: EnvSource): Env {
+  cached = parseEnv(source)
   return cached
+}
+
+export function getEnv(): Env {
+  if (cached) return cached
+  if (typeof process !== "undefined" && process.env?.SUPABASE_URL) {
+    return initEnv(process.env)
+  }
+  throw new Error("Env no inicializada")
 }

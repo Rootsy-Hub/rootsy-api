@@ -1,0 +1,13 @@
+# Deploy como Worker, no como Pages.
+# En el dashboard: Workers → Create → Connect to Git → root = rootsy-api.
+
+name = "rootsy-api"
+main = "src/worker.ts"
+compatibility_date = "2026-08-22"
+compatibility_flags = ["nodejs_compat"]
+
+# Secretos (no van acá):
+#   wrangler secret put SUPABASE_URL
+#   wrangler secret put SUPABASE_ANON_KEY
+#   wrangler secret put SUPABASE_JWT_SECRET
+#   wrangler secret put ROOTSY_API_SECRET
