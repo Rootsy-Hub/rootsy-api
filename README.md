@@ -16,8 +16,9 @@ Queda en `http://localhost:8787`.
 - `GET /health` — público, sin secret ni JWT
 - `GET /v1/me` — perfil (header)
 - `GET /v1/me/pops` — puntos de venta del usuario (dirección, imagen de fondo, dock)
-- `GET /v1/pops/:popId/articles` — artículos (filtros, búsqueda, paginado, stock)
-- `GET /v1/pops/:popId/articles/:articleId` — detalle (costos y listas de precio)
+- `GET|POST /v1/pops/:popId/articles` — listar / crear (costos, listas extra, stock inicial)
+- `POST /v1/pops/:popId/articles/image` — foto WebP
+- `GET|PATCH|DELETE /v1/pops/:popId/articles/:articleId` — detalle / editar / borrar
 - `GET|POST /v1/pops/:popId/price-lists` — listas de precios
 - `PATCH|DELETE /v1/pops/:popId/price-lists/:listId` — renombrar / borrar (no la principal)
 - `GET|POST /v1/pops/:popId/categories` — categorías de artículos

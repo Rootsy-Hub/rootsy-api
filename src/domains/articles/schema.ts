@@ -154,3 +154,65 @@ export type ArticleListData = {
   canUpdate: boolean
   canDelete: boolean
 }
+
+export const UNIT_OF_MEASURE_VALUES = [
+  "unidad",
+  "kg",
+  "g",
+  "lt",
+  "ml",
+  "m",
+  "cm",
+  "caja",
+] as const
+
+export const MAX_CUSTOM_UNIT_OF_MEASURE_LENGTH = 64
+
+export const ARTICLE_IVA_RATES = [0, 2.5, 5, 10.5, 21, 27] as const
+
+export const costLineSchema = z.object({
+  name: z.string().optional(),
+  costUnitLabel: z.string(),
+  saleUnitsPerCostUnit: z.number(),
+  unitPrice: z.number(),
+  supplierId: z.string().uuid().nullable().optional(),
+  isActive: z.boolean().optional(),
+})
+
+export const listPriceAmountSchema = z.object({
+  listId: z.string().uuid(),
+  amount: z.number().nullable(),
+})
+
+export const upsertArticleBodySchema = z.object({
+  name: z.string(),
+  description: z.string().optional().default(""),
+  imageUrl: z.string().optional().default(""),
+  brand: z.string().optional().default(""),
+  sku: z.string().optional().default(""),
+  barcode: z.string().optional().default(""),
+  salePrice: z.number(),
+  iva: z.number(),
+  categoryId: z.string().uuid(),
+  isActive: z.boolean(),
+  discountMode: z.enum(ARTICLE_DISCOUNT_MODES).nullable(),
+  discountValue: z.number().nullable(),
+  allowNegativeStock: z.boolean(),
+  itemKind: z.enum(ARTICLE_ITEM_KINDS),
+  unitOfMeasure: z.string(),
+  isSellable: z.boolean().optional(),
+  defaultWastePct: z.number().nullable(),
+  minStockLevel: z.number().nullable(),
+  costs: z.array(costLineSchema).optional(),
+  listPrices: z.array(listPriceAmountSchema).optional(),
+  siteId: z.string().optional(),
+  initialStockQuantity: z.number().nullable().optional(),
+})
+
+export const deleteArticleBodySchema = z.object({
+  confirmationTyped: z.string(),
+})
+
+export type CostLineInput = z.infer<typeof costLineSchema>
+export type ListPriceAmountInput = z.infer<typeof listPriceAmountSchema>
+export type UpsertArticleBody = z.infer<typeof upsertArticleBodySchema>
