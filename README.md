@@ -27,6 +27,7 @@ Queda en `http://localhost:8787`.
 - `GET /v1/pops/:popId/expense-categories` — gastos
 - `GET /v1/pops/:popId/recipe-categories` — recetas
 - `GET /v1/pops/:popId/service-categories` — servicios
+- `GET /v1/pops/:popId/suppliers` — proveedores activos (id, nombre). `?q=` busca por nombre o CUIT
 
 Rutas privadas piden:
 

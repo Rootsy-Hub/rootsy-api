@@ -9,6 +9,7 @@ import { expenseCategoryRoutes } from "./domains/expense-categories/routes.js"
 import { priceListRoutes } from "./domains/price-lists/routes.js"
 import { recipeCategoryRoutes } from "./domains/recipe-categories/routes.js"
 import { serviceCategoryRoutes } from "./domains/service-categories/routes.js"
+import { supplierRoutes } from "./domains/suppliers/routes.js"
 import { getEnv } from "./env.js"
 import { isTimeoutError } from "./lib/fetchTimeout.js"
 import { requireRequestTimeout } from "./lib/requestTimeout.js"
@@ -43,6 +44,7 @@ pop.route("/price-lists", priceListRoutes)
 pop.route("/expense-categories", expenseCategoryRoutes)
 pop.route("/recipe-categories", recipeCategoryRoutes)
 pop.route("/service-categories", serviceCategoryRoutes)
+pop.route("/suppliers", supplierRoutes)
 
 v1.route("/pops/:popId", pop)
 app.route("/v1", v1)
