@@ -21,11 +21,16 @@ Queda en `http://localhost:8787`.
 - `GET|PATCH|DELETE /v1/pops/:popId/articles/:articleId` — detalle / editar / borrar
 - `GET|POST /v1/pops/:popId/price-lists` — listas de precios
 - `PATCH|DELETE /v1/pops/:popId/price-lists/:listId` — renombrar / borrar (no la principal)
+- `GET|POST /v1/pops/:popId/clients` — listar / crear clientes
+- `PATCH|DELETE /v1/pops/:popId/clients/:clientId` — editar / borrar
 - `GET|POST /v1/pops/:popId/categories` — categorías de artículos
 - `PATCH /v1/pops/:popId/categories/layout` — orden y visibilidad en venta
 - `GET|PATCH|DELETE /v1/pops/:popId/categories/:categoryId` — detalle (incluye articleCount)
 - `GET|POST|PATCH|DELETE /v1/pops/:popId/dock` — dock del menú (preferencia del usuario)
 - `GET /v1/pops/:popId/expense-categories` — gastos
+- `GET|POST /v1/pops/:popId/promotions` — listar / crear promociones (slots y opciones)
+- `GET /v1/pops/:popId/promotions/catalog` — productos y recetas elegibles
+- `GET|PATCH|DELETE /v1/pops/:popId/promotions/:promotionId` — detalle / editar / borrar
 - `GET|POST /v1/pops/:popId/recipes` — listar / crear recetas (ingredientes y listas extra)
 - `POST /v1/pops/:popId/recipes/image` — foto WebP
 - `GET /v1/pops/:popId/recipes/ingredients` — buscar ingredientes (`?q=` o `?ids=`)
