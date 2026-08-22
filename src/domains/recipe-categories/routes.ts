@@ -12,11 +12,13 @@ import {
   createRecipeCategory,
   deleteRecipeCategory,
   getRecipeCategory,
+  layoutRecipeCategories,
   listRecipeCategories,
   updateRecipeCategory,
 } from "./queries.js"
 import {
   createRecipeCategoryBodySchema,
+  layoutRecipeCategoriesBodySchema,
   listRecipeCategoriesQuerySchema,
   updateRecipeCategoryBodySchema,
 } from "./schema.js"
@@ -47,18 +49,26 @@ recipeCategoryRoutes.get(
   },
 )
 
-recipeCategoryRoutes.get(
-  "/:categoryId",
-  requireAnyPermission(RECIPE_CATEGORY_READ),
+recipeCategoryRoutes.patch(
+  "/layout",
+  requireAnyPermission(RECIPE_CATEGORY_UPDATE),
   async (c) => {
-    const id = idSchema.safeParse(c.req.param("categoryId"))
-    if (!id.success) {
-      return c.json({ success: false, error: "categoryId inválido" }, 400)
+    const body = layoutRecipeCategoriesBodySchema.safeParse(
+      await c.req.json().catch(() => null),
+    )
+    if (!body.success) {
+      return c.json(
+        {
+          success: false,
+          error: body.error.issues[0]?.message ?? "Body inválido",
+        },
+        400,
+      )
     }
-    const result = await getRecipeCategory(
+    const result = await layoutRecipeCategories(
       c.get("supabase"),
       c.get("sidecar").popId,
-      id.data,
+      body.data.updates,
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -88,6 +98,24 @@ recipeCategoryRoutes.post(
     )
     if (!result.success) return c.json(result, result.status ?? 500)
     return c.json(result, 201)
+  },
+)
+
+recipeCategoryRoutes.get(
+  "/:categoryId",
+  requireAnyPermission(RECIPE_CATEGORY_READ),
+  async (c) => {
+    const id = idSchema.safeParse(c.req.param("categoryId"))
+    if (!id.success) {
+      return c.json({ success: false, error: "categoryId inválido" }, 400)
+    }
+    const result = await getRecipeCategory(
+      c.get("supabase"),
+      c.get("sidecar").popId,
+      id.data,
+    )
+    if (!result.success) return c.json(result, result.status)
+    return c.json(result)
   },
 )
 

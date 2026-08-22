@@ -7,7 +7,9 @@ import { categoryRoutes } from "./domains/categories/routes.js"
 import { dockRoutes } from "./domains/dock/routes.js"
 import { expenseCategoryRoutes } from "./domains/expense-categories/routes.js"
 import { priceListRoutes } from "./domains/price-lists/routes.js"
+import { comandaStationRoutes } from "./domains/comanda-stations/routes.js"
 import { recipeCategoryRoutes } from "./domains/recipe-categories/routes.js"
+import { recipeRoutes } from "./domains/recipes/routes.js"
 import { serviceCategoryRoutes } from "./domains/service-categories/routes.js"
 import { supplierRoutes } from "./domains/suppliers/routes.js"
 import { getEnv } from "./env.js"
@@ -39,10 +41,12 @@ const pop = new Hono<SidecarEnv>()
 pop.use("*", requirePopSidecar)
 pop.route("/articles", articleRoutes)
 pop.route("/categories", categoryRoutes)
+pop.route("/comanda-stations", comandaStationRoutes)
 pop.route("/dock", dockRoutes)
 pop.route("/price-lists", priceListRoutes)
 pop.route("/expense-categories", expenseCategoryRoutes)
 pop.route("/recipe-categories", recipeCategoryRoutes)
+pop.route("/recipes", recipeRoutes)
 pop.route("/service-categories", serviceCategoryRoutes)
 pop.route("/suppliers", supplierRoutes)
 

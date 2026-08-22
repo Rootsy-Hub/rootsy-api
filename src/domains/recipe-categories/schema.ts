@@ -31,6 +31,18 @@ export const updateRecipeCategoryBodySchema = z
     message: "Nada para actualizar",
   })
 
+export const layoutRecipeCategoriesBodySchema = z.object({
+  updates: z
+    .array(
+      z.object({
+        id: z.string().uuid(),
+        sortOrder: z.number().int().min(0),
+        showInMenu: z.boolean(),
+      }),
+    )
+    .min(1, "Nada para actualizar"),
+})
+
 export type RecipeCategoryRow = {
   id: string
   popId: string
@@ -39,6 +51,11 @@ export type RecipeCategoryRow = {
   showInMenu: boolean
   isActive: boolean
   stationId: string | null
+  stationName: string | null
   createdAt: string
   updatedAt: string
+}
+
+export type RecipeCategoryDetail = RecipeCategoryRow & {
+  recipeCount: number
 }

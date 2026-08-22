@@ -1,8 +1,8 @@
 import type { SupabaseClient } from "@supabase/supabase-js"
-import type { RecipeCategoryRow } from "./schema.js"
+import type { RecipeCategoryDetail, RecipeCategoryRow } from "./schema.js"
 
 const SELECT =
-  "id, pop_id, name, sort_order, show_in_menu, is_active, station_id, created_at, updated_at"
+  "id, pop_id, name, sort_order, show_in_menu, is_active, station_id, created_at, updated_at, comanda_stations ( name )"
 
 type RecipeCategoryDbRow = {
   id: string
@@ -14,6 +14,14 @@ type RecipeCategoryDbRow = {
   station_id: string | null
   created_at: string
   updated_at: string
+  comanda_stations?: { name?: string } | { name?: string }[] | null
+}
+
+function stationNameFromRow(row: RecipeCategoryDbRow): string | null {
+  const stationRel = row.comanda_stations
+  const station = Array.isArray(stationRel) ? stationRel[0] : stationRel
+  const name = station?.name?.trim()
+  return name ? name : null
 }
 
 function mapRow(row: RecipeCategoryDbRow): RecipeCategoryRow {
@@ -25,6 +33,7 @@ function mapRow(row: RecipeCategoryDbRow): RecipeCategoryRow {
     showInMenu: Boolean(row.show_in_menu),
     isActive: Boolean(row.is_active),
     stationId: row.station_id,
+    stationName: stationNameFromRow(row),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }
@@ -93,7 +102,7 @@ export async function getRecipeCategory(
   popId: string,
   categoryId: string,
 ): Promise<
-  | { success: true; data: RecipeCategoryRow }
+  | { success: true; data: RecipeCategoryDetail }
   | { success: false; error: string; status: 404 | 500 }
 > {
   const { data, error } = await supabase
@@ -107,7 +116,21 @@ export async function getRecipeCategory(
   if (!data) {
     return { success: false, error: "Categoría no encontrada", status: 404 }
   }
-  return { success: true, data: mapRow(data as RecipeCategoryDbRow) }
+
+  const { count, error: countError } = await supabase
+    .from("recipes")
+    .select("id", { count: "exact", head: true })
+    .eq("pop_id", popId)
+    .eq("category_id", categoryId)
+  if (countError) return { success: false, error: countError.message, status: 500 }
+
+  return {
+    success: true,
+    data: {
+      ...mapRow(data as RecipeCategoryDbRow),
+      recipeCount: count ?? 0,
+    },
+  }
 }
 
 export async function createRecipeCategory(
@@ -232,5 +255,41 @@ export async function deleteRecipeCategory(
     .eq("pop_id", popId)
 
   if (error) return { success: false, error: error.message, status: 500 }
+  return { success: true }
+}
+
+export async function layoutRecipeCategories(
+  supabase: SupabaseClient,
+  popId: string,
+  updates: { id: string; sortOrder: number; showInMenu: boolean }[],
+): Promise<{ success: true } | { success: false; error: string; status: 400 | 500 }> {
+  const ids = [...new Set(updates.map((u) => u.id))]
+  const { data: validRows, error: validErr } = await supabase
+    .from("recipe_categories")
+    .select("id")
+    .eq("pop_id", popId)
+    .in("id", ids)
+
+  if (validErr) return { success: false, error: validErr.message, status: 500 }
+
+  const validIds = new Set((validRows ?? []).map((row) => String(row.id)))
+  const filtered = updates.filter((u) => validIds.has(u.id))
+  if (filtered.length === 0) {
+    return { success: false, error: "Ninguna categoría es válida.", status: 400 }
+  }
+
+  for (const u of filtered) {
+    const { error } = await supabase
+      .from("recipe_categories")
+      .update({
+        sort_order: u.sortOrder,
+        show_in_menu: u.showInMenu,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", u.id)
+      .eq("pop_id", popId)
+    if (error) return { success: false, error: error.message, status: 500 }
+  }
+
   return { success: true }
 }
