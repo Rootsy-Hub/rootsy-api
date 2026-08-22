@@ -1,3 +1,3 @@
-/** Keys reales de POP_PERMS. */
+/** Entrar a Estadísticas exige statistics:read, no operations. */
 
-export const STATISTICS_READ = ["operations:read", "accounts:read"] as const
+export const STATISTICS_READ = ["statistics:read"] as const

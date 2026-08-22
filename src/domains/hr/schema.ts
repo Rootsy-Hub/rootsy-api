@@ -19,6 +19,26 @@ export const francoBodySchema = z.object({
   day: z.string(),
 })
 
+export const EMPLOYEE_PAYMENT_KINDS = [
+  "cash",
+  "card_debit",
+  "card_credit",
+  "transfer",
+  "other",
+] as const
+
+export const recordEmployeePaymentBodySchema = z.object({
+  amount: z.number(),
+  paidAt: z.string().regex(CALENDAR_DAY_RE),
+  paymentKind: z.enum(EMPLOYEE_PAYMENT_KINDS),
+  treasuryAccountId: z.string().uuid(),
+  notes: z.string().optional().nullable(),
+})
+
+export type RecordEmployeePaymentBody = z.infer<
+  typeof recordEmployeePaymentBodySchema
+>
+
 export const inviteBodySchema = z.object({
   employeeId: z.string().uuid(),
   roleId: z.string().uuid(),
@@ -67,6 +87,16 @@ export type AttendancePunchRow = {
 export type FrancoRow = {
   id: string
   day: string
+}
+
+export type EmployeePaymentRow = {
+  id: string
+  amount: number
+  paidAt: string
+  paymentKind: string
+  treasuryAccountId: string
+  treasuryAccountName: string | null
+  notes: string | null
 }
 
 export type PopRoleRow = {
@@ -119,6 +149,7 @@ export type EmployeeDetailData = {
   employee: EmployeeRow
   punches: AttendancePunchRow[]
   francos: FrancoRow[]
+  payments: EmployeePaymentRow[]
   imageUrl: string | null
   canManagePeople: boolean
 }

@@ -23,7 +23,11 @@ async function computePaidOutAsOf(
   asOfDate: string,
 ): Promise<number> {
   let total = 0
-  for (const table of ["purchase_payments", "expense_payments"] as const) {
+  for (const table of [
+    "purchase_payments",
+    "expense_payments",
+    "pop_employee_payments",
+  ] as const) {
     const { data } = await supabase
       .from(table)
       .select("amount, paid_at")

@@ -38,7 +38,9 @@ export async function getHrDashboard(
   const peopleRes = await listEmployees(supabase, popId)
   if (!peopleRes.success) return peopleRes
 
-  const pendingInvites = isOwner
+  const canManageInvites =
+    isOwner || hasAnyPermission(keys, ["hr:create", "hr:update"], false)
+  const pendingInvites = canManageInvites
     ? await loadPendingInvites(supabase, popId, inviteBaseUrl)
     : []
 
@@ -47,7 +49,7 @@ export async function getHrDashboard(
     data: {
       popName: String(pop.name ?? ""),
       isOwner,
-      canManageInvites: isOwner,
+      canManageInvites,
       canManagePeople:
         isOwner || hasAnyPermission(keys, ["hr:create", "hr:update"], false),
       permissionKeys: [...keys],

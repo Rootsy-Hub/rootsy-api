@@ -173,6 +173,7 @@ export type TreasuryMovementRow = {
     | "sale"
     | "purchase"
     | "expense"
+    | "employee_payment"
     | "card_settlement"
     | "funding_out"
     | "cash_register_close"

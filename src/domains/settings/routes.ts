@@ -74,7 +74,6 @@ settingsRoutes.patch(
     const result = await updateSettingsFiscal(
       c.get("supabase"),
       c.get("sidecar").popId,
-      c.get("sidecar").isOwner,
       body.data,
     )
     if (!result.success) return c.json(result, result.status)

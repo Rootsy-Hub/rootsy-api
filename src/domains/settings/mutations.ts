@@ -74,17 +74,8 @@ export async function updateSettingsBusiness(
 export async function updateSettingsFiscal(
   supabase: SupabaseClient,
   popId: string,
-  isOwner: boolean,
   input: UpdateFiscalBody,
 ): Promise<MutateResult> {
-  if (!isOwner) {
-    return {
-      success: false,
-      error: "Solo el titular puede editar los datos fiscales.",
-      status: 403,
-    }
-  }
-
   const acts = parsePadronActividadesJson(input.fiscalPadronActividadesJson)
   if (!acts.ok) return { success: false, error: acts.error, status: 400 }
 

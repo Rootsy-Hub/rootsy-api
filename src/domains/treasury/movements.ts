@@ -568,6 +568,59 @@ export async function getTreasuryAccountMovements(
     })
   }
 
+  const { data: empPayRows, error: empPayErr } = await supabase
+    .from("pop_employee_payments")
+    .select(
+      `
+      id,
+      amount,
+      paid_at,
+      created_at,
+      treasury_account_id,
+      payment_kind,
+      notes,
+      pop_employees ( first_name, last_name )
+    `,
+    )
+    .eq("pop_id", popId)
+    .in("treasury_account_id", movementAccountIds)
+    .order("paid_at", { ascending: false })
+    .limit(paymentOutFetchLimit)
+  if (empPayErr) {
+    return {
+      success: false,
+      error: empPayErr.message || "No se pudieron cargar pagos de sueldos.",
+      status: 500,
+    }
+  }
+  for (const row of empPayRows || []) {
+    const person = row.pop_employees as unknown as {
+      first_name?: string | null
+      last_name?: string | null
+    } | null
+    const personName =
+      `${String(person?.first_name ?? "").trim()} ${String(person?.last_name ?? "").trim()}`.trim()
+      || "Persona"
+    const sourceTaId =
+      row.treasury_account_id != null ? String(row.treasury_account_id) : accountId
+    const date = String(row.paid_at ?? "").slice(0, 10)
+    if (!inDateRange(date)) continue
+    const note = String(row.notes ?? "").trim()
+    drafts.push({
+      id: String(row.id),
+      kind: "employee_payment",
+      date,
+      occurredAt: String(row.created_at ?? row.paid_at ?? "").trim() || date,
+      amount: parseMoney(row.amount),
+      label: note ? `Sueldo, ${personName}, ${note}` : `Sueldo, ${personName}`,
+      direction: "out",
+      paymentKind: parsePaymentKind(row.payment_kind),
+      treasuryAccountLabel: treasuryLabel(accountMeta.get(sourceTaId)),
+      sourceAccountName:
+        sourceTaId !== accountId ? (accountNames.get(sourceTaId) ?? null) : null,
+    })
+  }
+
   if (!isCardPayable) {
     const { data: fundSettleRows } = await supabase
       .from("treasury_settlements")

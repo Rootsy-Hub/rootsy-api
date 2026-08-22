@@ -33,6 +33,9 @@ export const DOCK_ITEM_IDS = [
   "statistics",
   "checks",
   "current-accounts",
+  "alerts",
+  "chat",
+  "manufacturing",
 ] as const
 
 export type DockItemId = (typeof DOCK_ITEM_IDS)[number]

@@ -1,11 +1,11 @@
-/** Keys reales de POP_PERMS. */
+/** Entrar a Reportes exige reports:read. Los recortes internos suman el módulo fuente. */
 
-export const REPORT_READ = ["operations:read", "accounts:read"] as const
+export const REPORT_READ = ["reports:read"] as const
 
-export const REPORT_SALES = ["operations:read", "sale:read"] as const
+export const REPORT_SALES = ["reports:read"] as const
 
-export const REPORT_PURCHASES = ["operations:read"] as const
+export const REPORT_PURCHASES = ["reports:read"] as const
 
-export const REPORT_EXPENSES = ["operations:read", "expenses:read"] as const
+export const REPORT_EXPENSES = ["reports:read"] as const
 
-export const REPORT_INVOICES = ["operations:read", "invoices:read"] as const
+export const REPORT_INVOICES = ["reports:read"] as const

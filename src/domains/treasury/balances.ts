@@ -20,7 +20,11 @@ async function lifetimePaidByTreasuryAccount(
 ): Promise<Map<string, number>> {
   const totals = new Map<string, number>()
   if (accountIds.length === 0) return totals
-  for (const table of ["purchase_payments", "expense_payments"] as const) {
+  for (const table of [
+    "purchase_payments",
+    "expense_payments",
+    "pop_employee_payments",
+  ] as const) {
     const { data } = await supabase
       .from(table)
       .select("treasury_account_id, amount")

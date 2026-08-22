@@ -52,7 +52,7 @@ type LedgerLine = {
   line_order: number
 }
 
-async function postBalancedEntry(
+export async function postBalancedEntry(
   supabase: SupabaseClient,
   args: {
     popId: string

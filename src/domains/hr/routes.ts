@@ -13,6 +13,7 @@ import {
   removeEmployeeFranco,
   upsertEmployee,
 } from "./employees.js"
+import { loadHrPaymentContext, recordEmployeePayment } from "./payments.js"
 import { getHrDashboard } from "./hub.js"
 import {
   createInvitation,
@@ -22,12 +23,12 @@ import {
   revokeInvitation,
   updateMemberRole,
 } from "./members.js"
-import { requireOwner } from "./owner.js"
 import { createRole, deleteRole, getRoleEditor, saveRolePermissions } from "./roles.js"
 import {
   createRoleBodySchema,
   francoBodySchema,
   inviteBodySchema,
+  recordEmployeePaymentBodySchema,
   memberRoleBodySchema,
   roleGrantsBodySchema,
   upsertEmployeeBodySchema,
@@ -227,6 +228,43 @@ hrRoutes.post(
   },
 )
 
+hrRoutes.get(
+  "/payment-context",
+  requireAnyPermission(HR_WRITE),
+  async (c) => {
+    const result = await loadHrPaymentContext(
+      c.get("supabase"),
+      c.get("sidecar").popId,
+    )
+    if (!result.success) return c.json(result, 500)
+    return c.json(result)
+  },
+)
+
+hrRoutes.post(
+  "/employees/:employeeId/payments",
+  requireAnyPermission(HR_WRITE),
+  async (c) => {
+    const employeeId = idSchema.safeParse(c.req.param("employeeId"))
+    if (!employeeId.success) {
+      return c.json({ success: false, error: "Persona inválida" }, 400)
+    }
+    const body = recordEmployeePaymentBodySchema.safeParse(
+      await c.req.json().catch(() => null),
+    )
+    if (!body.success) return c.json(bodyError(body.error.issues), 400)
+    const result = await recordEmployeePayment(
+      c.get("supabase"),
+      c.get("sidecar").popId,
+      c.get("userId"),
+      employeeId.data,
+      body.data,
+    )
+    if (!result.success) return c.json(result, result.status)
+    return c.json(result, 201)
+  },
+)
+
 hrRoutes.delete(
   "/employees/:employeeId/francos/:francoId",
   requireAnyPermission(HR_WRITE),
@@ -247,7 +285,7 @@ hrRoutes.delete(
   },
 )
 
-hrRoutes.post("/invitations", requireOwner, async (c) => {
+hrRoutes.post("/invitations", requireAnyPermission(HR_WRITE), async (c) => {
   const body = inviteBodySchema.safeParse(await c.req.json().catch(() => null))
   if (!body.success) return c.json(bodyError(body.error.issues), 400)
   const result = await createInvitation(
@@ -273,7 +311,7 @@ hrRoutes.post("/invitations", requireOwner, async (c) => {
 
 hrRoutes.post(
   "/invitations/:invitationId/revoke",
-  requireOwner,
+  requireAnyPermission(HR_WRITE),
   async (c) => {
     const invitationId = idSchema.safeParse(c.req.param("invitationId"))
     if (!invitationId.success) {
@@ -291,7 +329,7 @@ hrRoutes.post(
 
 hrRoutes.post(
   "/invitations/:invitationId/renew",
-  requireOwner,
+  requireAnyPermission(HR_WRITE),
   async (c) => {
     const invitationId = idSchema.safeParse(c.req.param("invitationId"))
     if (!invitationId.success) {
@@ -311,7 +349,7 @@ hrRoutes.post(
   },
 )
 
-hrRoutes.patch("/members/:userId/role", requireOwner, async (c) => {
+hrRoutes.patch("/members/:userId/role", requireAnyPermission(HR_WRITE), async (c) => {
   const userId = idSchema.safeParse(c.req.param("userId"))
   if (!userId.success) {
     return c.json({ success: false, error: "Miembro inválido" }, 400)
@@ -335,7 +373,7 @@ hrRoutes.patch("/members/:userId/role", requireOwner, async (c) => {
   return c.json(result)
 })
 
-hrRoutes.post("/members/:userId/deactivate", requireOwner, async (c) => {
+hrRoutes.post("/members/:userId/deactivate", requireAnyPermission(HR_WRITE), async (c) => {
   const userId = idSchema.safeParse(c.req.param("userId"))
   if (!userId.success) {
     return c.json({ success: false, error: "Miembro inválido" }, 400)
@@ -356,7 +394,7 @@ hrRoutes.post("/members/:userId/deactivate", requireOwner, async (c) => {
   return c.json(result)
 })
 
-hrRoutes.delete("/members/:userId", requireOwner, async (c) => {
+hrRoutes.delete("/members/:userId", requireAnyPermission(HR_WRITE), async (c) => {
   const userId = idSchema.safeParse(c.req.param("userId"))
   if (!userId.success) {
     return c.json({ success: false, error: "Miembro inválido" }, 400)
@@ -377,7 +415,7 @@ hrRoutes.delete("/members/:userId", requireOwner, async (c) => {
   return c.json(result)
 })
 
-hrRoutes.get("/roles/:roleId", requireOwner, async (c) => {
+hrRoutes.get("/roles/:roleId", requireAnyPermission(HR_WRITE), async (c) => {
   const roleId = idSchema.safeParse(c.req.param("roleId"))
   if (!roleId.success) {
     return c.json({ success: false, error: "Rol inválido" }, 400)
@@ -391,7 +429,7 @@ hrRoutes.get("/roles/:roleId", requireOwner, async (c) => {
   return c.json(result)
 })
 
-hrRoutes.post("/roles", requireOwner, async (c) => {
+hrRoutes.post("/roles", requireAnyPermission(HR_WRITE), async (c) => {
   const body = createRoleBodySchema.safeParse(await c.req.json().catch(() => null))
   if (!body.success) return c.json(bodyError(body.error.issues), 400)
   const result = await createRole(
@@ -404,7 +442,7 @@ hrRoutes.post("/roles", requireOwner, async (c) => {
   return c.json({ success: true, data: { roleId: result.roleId } }, 201)
 })
 
-hrRoutes.patch("/roles/:roleId", requireOwner, async (c) => {
+hrRoutes.patch("/roles/:roleId", requireAnyPermission(HR_WRITE), async (c) => {
   const roleId = idSchema.safeParse(c.req.param("roleId"))
   if (!roleId.success) {
     return c.json({ success: false, error: "Rol inválido" }, 400)
@@ -421,7 +459,7 @@ hrRoutes.patch("/roles/:roleId", requireOwner, async (c) => {
   return c.json(result)
 })
 
-hrRoutes.delete("/roles/:roleId", requireOwner, async (c) => {
+hrRoutes.delete("/roles/:roleId", requireAnyPermission(HR_WRITE), async (c) => {
   const roleId = idSchema.safeParse(c.req.param("roleId"))
   if (!roleId.success) {
     return c.json({ success: false, error: "Rol inválido" }, 400)

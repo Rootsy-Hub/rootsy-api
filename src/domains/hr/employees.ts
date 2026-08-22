@@ -11,6 +11,7 @@ import {
   parseSalaryInput,
   type AttendancePunchRow,
   type EmployeeDetailData,
+  type EmployeePaymentRow,
   type EmployeeRow,
   type FrancoRow,
   type MemberRow,
@@ -168,6 +169,21 @@ export async function getEmployeeDetail(
     return { success: false, error: francoError.message, status: 500 }
   }
 
+  const { data: paymentRows, error: paymentError } = await supabase
+    .from("pop_employee_payments")
+    .select(
+      "id, amount, paid_at, payment_kind, treasury_account_id, notes, treasury_accounts ( name )",
+    )
+    .eq("pop_id", popId)
+    .eq("employee_id", employeeId)
+    .order("paid_at", { ascending: false })
+    .order("created_at", { ascending: false })
+    .limit(500)
+
+  if (paymentError) {
+    return { success: false, error: paymentError.message, status: 500 }
+  }
+
   const punches: AttendancePunchRow[] = (punchRows || []).map((punch) => ({
     id: String(punch.id),
     clockedInAt: String(punch.clocked_in_at),
@@ -177,6 +193,23 @@ export async function getEmployeeDetail(
     id: String(franco.id),
     day: asCalendarDay(String(franco.day ?? "")),
   }))
+  const payments: EmployeePaymentRow[] = (paymentRows || []).map((payment) => {
+    const account = payment.treasury_accounts as unknown as
+      | { name?: string | null }
+      | { name?: string | null }[]
+      | null
+    const accountRow = Array.isArray(account) ? account[0] : account
+    const amount = Number(payment.amount)
+    return {
+      id: String(payment.id),
+      amount: Number.isFinite(amount) ? amount : 0,
+      paidAt: asCalendarDay(String(payment.paid_at ?? "")),
+      paymentKind: String(payment.payment_kind ?? ""),
+      treasuryAccountId: String(payment.treasury_account_id ?? ""),
+      treasuryAccountName: accountRow?.name ? String(accountRow.name) : null,
+      notes: payment.notes != null ? String(payment.notes) : null,
+    }
+  })
   const openPunch = punches.find((punch) => punch.clockedOutAt == null)
   const openByEmployee = new Map<string, string>()
   if (openPunch) openByEmployee.set(String(row.id), openPunch.clockedInAt)
@@ -197,6 +230,7 @@ export async function getEmployeeDetail(
       employee: mapEmployee(row as EmployeeDbRow, openByEmployee),
       punches,
       francos,
+      payments,
       imageUrl,
       canManagePeople:
         isOwner || hasAnyPermission(keys, ["hr:create", "hr:update"], false),
