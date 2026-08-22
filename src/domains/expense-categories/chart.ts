@@ -34,3 +34,37 @@ export function sortOrderFromChartCode(prefix: string, code: string): number {
   const suffix = Number.parseInt(code.slice(prefix.length + 1), 10)
   return Number.isFinite(suffix) ? suffix : 1000
 }
+
+export const EXPENSE_SYSTEM_VIEW_ONLY_CODES = [
+  "6.1.1.03",
+  "6.1.1.04",
+  "6.1.1.05",
+  "6.2.1.03",
+  "6.3.1.01",
+] as const
+
+const EXPENSE_DEFAULT_KIND_BY_CODE: Record<string, string> = {
+  "6.1.1.01": "fijo",
+  "6.1.1.02": "fijo",
+  "6.1.1.03": "otro",
+  "6.1.1.04": "otro",
+  "6.1.1.05": "otro",
+  "6.2.1.01": "variable",
+  "6.2.1.02": "variable",
+  "6.2.1.03": "otro",
+  "6.2.1.99": "variable",
+  "6.3.1.01": "otro",
+}
+
+export function isExpenseSystemViewOnlyCode(code: string): boolean {
+  return (EXPENSE_SYSTEM_VIEW_ONLY_CODES as readonly string[]).includes(
+    code.trim(),
+  )
+}
+
+export function isExpenseDefaultChartCode(code: string): boolean {
+  return Object.prototype.hasOwnProperty.call(
+    EXPENSE_DEFAULT_KIND_BY_CODE,
+    code.trim(),
+  )
+}

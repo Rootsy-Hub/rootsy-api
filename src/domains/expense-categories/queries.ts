@@ -1,6 +1,8 @@
 import type { SupabaseClient } from "@supabase/supabase-js"
 import {
   EXPENSE_FAMILY_PREFIX,
+  isExpenseDefaultChartCode,
+  isExpenseSystemViewOnlyCode,
   nextExpenseChartCode,
   sortOrderFromChartCode,
   type ExpenseFamily,
@@ -8,7 +10,7 @@ import {
 import type { ExpenseCategoryRow } from "./schema.js"
 
 const SELECT =
-  "id, pop_id, name, kind, sort_order, deleted_at, created_at, accounting_chart_account_id, accounting_chart_of_accounts ( code )"
+  "id, pop_id, name, kind, sort_order, deleted_at, created_at, accounting_chart_account_id, accounting_chart_of_accounts ( code, metadata )"
 
 type ExpenseCategoryDbRow = {
   id: string
@@ -20,18 +22,27 @@ type ExpenseCategoryDbRow = {
   created_at: string
   accounting_chart_account_id: string | null
   accounting_chart_of_accounts?:
-    | { code?: string | null }
-    | { code?: string | null }[]
+    | { code?: string | null; metadata?: { user_created?: boolean } }
+    | { code?: string | null; metadata?: { user_created?: boolean } }[]
     | null
 }
 
-function chartCodeFromRow(row: ExpenseCategoryDbRow): string | null {
+function chartFromRow(row: ExpenseCategoryDbRow): {
+  code: string | null
+  userCreated: boolean
+} {
   const rel = row.accounting_chart_of_accounts
   const chart = Array.isArray(rel) ? rel[0] : rel
-  return chart?.code != null ? String(chart.code) : null
+  return {
+    code: chart?.code != null ? String(chart.code) : null,
+    userCreated: chart?.metadata?.user_created === true,
+  }
 }
 
 function mapRow(row: ExpenseCategoryDbRow): ExpenseCategoryRow {
+  const { code, userCreated } = chartFromRow(row)
+  const readOnly = code ? isExpenseSystemViewOnlyCode(code) : false
+  const seeded = code ? isExpenseDefaultChartCode(code) : false
   return {
     id: row.id,
     popId: row.pop_id,
@@ -40,9 +51,20 @@ function mapRow(row: ExpenseCategoryDbRow): ExpenseCategoryRow {
     sortOrder: row.sort_order ?? 0,
     deletedAt: row.deleted_at,
     accountingChartAccountId: row.accounting_chart_account_id,
-    accountCode: chartCodeFromRow(row),
+    accountCode: code,
     createdAt: row.created_at,
+    readOnly,
+    canDelete: userCreated && !readOnly && !seeded,
   }
+}
+
+export async function seedPopExpenseCategories(
+  supabase: SupabaseClient,
+  popId: string,
+): Promise<void> {
+  await supabase.rpc("ensure_pop_expense_categories_from_chart", {
+    p_pop_id: popId,
+  })
 }
 
 export async function listExpenseCategories(
@@ -61,6 +83,8 @@ export async function listExpenseCategories(
     .eq("pop_id", popId)
     .order("sort_order")
     .order("name")
+
+  await seedPopExpenseCategories(supabase, popId)
 
   if (!filters.includeDeleted) q = q.is("deleted_at", null)
   if (filters.kind) q = q.eq("kind", filters.kind)
@@ -253,12 +277,25 @@ export async function deleteExpenseCategory(
   if (countError) {
     return { success: false, error: countError.message, status: 500 }
   }
-  if ((count ?? 0) > 0) {
+  if (!existing.data.canDelete) {
     return {
       success: false,
       status: 409,
-      error: `No se puede eliminar "${existing.data.name}": tiene ${count} gasto(s).`,
+      error: existing.data.readOnly
+        ? "Esa cuenta la usa otro módulo."
+        : "Las cuentas del plan no se eliminan desde acá.",
     }
+  }
+  if ((count ?? 0) > 0) {
+    const { error: softErr } = await supabase
+      .from("expense_categories")
+      .update({ deleted_at: new Date().toISOString() })
+      .eq("id", categoryId)
+      .eq("pop_id", popId)
+    if (softErr) {
+      return { success: false, error: softErr.message, status: 500 }
+    }
+    return { success: true }
   }
 
   const chartId = existing.data.accountingChartAccountId

@@ -7,6 +7,7 @@ import { categoryRoutes } from "./domains/categories/routes.js"
 import { clientRoutes } from "./domains/clients/routes.js"
 import { dockRoutes } from "./domains/dock/routes.js"
 import { expenseCategoryRoutes } from "./domains/expense-categories/routes.js"
+import { expenseRoutes } from "./domains/expenses/routes.js"
 import { priceListRoutes } from "./domains/price-lists/routes.js"
 import { comandaStationRoutes } from "./domains/comanda-stations/routes.js"
 import { recipeCategoryRoutes } from "./domains/recipe-categories/routes.js"
@@ -20,6 +21,8 @@ import { arcaSalePointRoutes } from "./domains/arca-sale-points/routes.js"
 import { quoteRoutes } from "./domains/quotes/routes.js"
 import { purchaseOrderRoutes } from "./domains/purchase-orders/routes.js"
 import { checkRoutes } from "./domains/checks/routes.js"
+import { currentAccountRoutes } from "./domains/current-accounts/routes.js"
+import { inventoryRoutes } from "./domains/inventory/routes.js"
 import { settingsRoutes } from "./domains/settings/routes.js"
 import { getEnv } from "./env.js"
 import { isTimeoutError } from "./lib/fetchTimeout.js"
@@ -55,6 +58,7 @@ pop.route("/comanda-stations", comandaStationRoutes)
 pop.route("/dock", dockRoutes)
 pop.route("/price-lists", priceListRoutes)
 pop.route("/expense-categories", expenseCategoryRoutes)
+pop.route("/expenses", expenseRoutes)
 pop.route("/recipe-categories", recipeCategoryRoutes)
 pop.route("/promotions", promotionRoutes)
 pop.route("/recipes", recipeRoutes)
@@ -66,6 +70,8 @@ pop.route("/arca-sale-points", arcaSalePointRoutes)
 pop.route("/quotes", quoteRoutes)
 pop.route("/purchase-orders", purchaseOrderRoutes)
 pop.route("/checks", checkRoutes)
+pop.route("/current-accounts", currentAccountRoutes)
+pop.route("/inventory", inventoryRoutes)
 pop.route("/settings", settingsRoutes)
 
 v1.route("/pops/:popId", pop)

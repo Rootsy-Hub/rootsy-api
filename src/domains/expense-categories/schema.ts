@@ -42,4 +42,6 @@ export type ExpenseCategoryRow = {
   accountingChartAccountId: string | null
   accountCode: string | null
   createdAt: string
+  readOnly: boolean
+  canDelete: boolean
 }
