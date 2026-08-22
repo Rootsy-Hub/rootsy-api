@@ -79,3 +79,11 @@ export function findInvoiceTypeByArcaCbteTipo(
   const list = TYPES_BY_SITE[siteId] ?? TYPES_BY_SITE[DEFAULT_SITE_ID]
   return list.find((o) => o.arcaCbteTipo === arcaCbteTipo)
 }
+
+export function findInvoiceTypeByLabel(
+  siteId: string,
+  label: string,
+): InvoiceTypeOption | undefined {
+  const list = TYPES_BY_SITE[siteId] ?? TYPES_BY_SITE[DEFAULT_SITE_ID]
+  return list.find((o) => o.label === label)
+}
