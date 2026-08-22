@@ -29,7 +29,9 @@ export async function verifySupabaseAccessToken(
   const jwksUrl = env.SUPABASE_JWKS_URL!
   let jwks = JWKS_CACHE.get(jwksUrl)
   if (!jwks) {
-    jwks = createRemoteJWKSet(new URL(jwksUrl))
+    jwks = createRemoteJWKSet(new URL(jwksUrl), {
+      timeoutDuration: env.SUPABASE_TIMEOUT_MS,
+    })
     JWKS_CACHE.set(jwksUrl, jwks)
   }
   const { payload } = await jwtVerify(token, jwks, verifyOpts)

@@ -34,12 +34,20 @@ export const requirePrivateAuth: MiddlewareHandler<PrivateAuthEnv> = async (
   const env = getEnv()
   const secret = c.req.header("x-rootsy-api-secret")?.trim() ?? ""
   if (!secret || !secretsMatch(secret, env.ROOTSY_API_SECRET)) {
-    return c.json({ success: false, error: "Unauthorized" }, 401)
+    return c.json({ success: false, error: "Unauthorized: secret" }, 401)
   }
 
   const token = bearerToken(c.req.header("authorization"))
   if (!token) {
-    return c.json({ success: false, error: "Unauthorized" }, 401)
+    return c.json({ success: false, error: "Unauthorized: jwt missing" }, 401)
+  }
+
+  const parts = token.split(".")
+  if (parts.length !== 3) {
+    return c.json(
+      { success: false, error: "Unauthorized: jwt incompleto" },
+      401,
+    )
   }
 
   try {
@@ -53,6 +61,6 @@ export const requirePrivateAuth: MiddlewareHandler<PrivateAuthEnv> = async (
     c.set("supabase", createUserSupabaseClient(token))
     await next()
   } catch {
-    return c.json({ success: false, error: "Unauthorized" }, 401)
+    return c.json({ success: false, error: "Unauthorized: jwt inválido" }, 401)
   }
 }

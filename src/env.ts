@@ -7,6 +7,10 @@ const envSchema = z.object({
   SUPABASE_JWKS_URL: z.string().url().optional(),
   ROOTSY_API_SECRET: z.string().min(16),
   PORT: z.coerce.number().int().positive().default(8787),
+  /** Tope de cada hop a Supabase (PostgREST / Auth). */
+  SUPABASE_TIMEOUT_MS: z.coerce.number().int().positive().default(8000),
+  /** Tope del request HTTP completo. */
+  REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(15000),
 })
 
 export type Env = z.infer<typeof envSchema>

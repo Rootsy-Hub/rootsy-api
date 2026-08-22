@@ -1,11 +1,24 @@
+import type { MiddlewareHandler } from "hono"
 import type { SupabaseClient } from "@supabase/supabase-js"
+import { z } from "zod"
+import type { PrivateAuthEnv } from "../auth/private.js"
+
+const popIdSchema = z.string().uuid()
 
 const DEFAULT_SITE_ID = "arg"
-const MESAS_READ_KEY = "mesas:read"
 
-export type PopAccessGate =
-  | { ok: true; popSiteId: string }
-  | { ok: false; error: string; redirect?: string; status: 403 | 404 }
+export type PopSidecar = {
+  popId: string
+  popSiteId: string
+  keys: string[]
+  isOwner: boolean
+}
+
+export type SidecarEnv = PrivateAuthEnv & {
+  Variables: PrivateAuthEnv["Variables"] & {
+    sidecar: PopSidecar
+  }
+}
 
 function permissionRowToKey(row: unknown): string | null {
   if (row == null) return null
@@ -27,7 +40,7 @@ function permissionRowToKey(row: unknown): string | null {
   return null
 }
 
-function permissionRowsToKeys(data: unknown): string[] {
+export function permissionRowsToKeys(data: unknown): string[] {
   if (!Array.isArray(data)) return []
   const out: string[] = []
   for (const row of data) {
@@ -57,16 +70,14 @@ function siteIdFromPopRow(row: {
   return DEFAULT_SITE_ID
 }
 
-function siteIdsMatch(routeSiteId: string, popSiteId: string): boolean {
-  return routeSiteId.trim().toLowerCase() === popSiteId.trim().toLowerCase()
-}
-
-export async function requireMesasLayoutAccess(
+export async function loadPopSidecar(
   supabase: SupabaseClient,
   userId: string,
   popId: string,
-  routeSiteId: string,
-): Promise<PopAccessGate> {
+): Promise<
+  | { ok: true; sidecar: PopSidecar }
+  | { ok: false; error: string; redirect?: string; status: 403 | 404 }
+> {
   const [{ data: hasAccess, error: accessError }, { data: isActive }] =
     await Promise.all([
       supabase.rpc("user_has_pop_access", {
@@ -104,36 +115,47 @@ export async function requireMesasLayoutAccess(
     return { ok: false, status: 404, error: "POP no encontrado" }
   }
 
-  const popSiteId = siteIdFromPopRow({
-    site_id: pop.site_id as string | null | undefined,
-    settings: pop.settings,
-  })
-
-  if (!siteIdsMatch(routeSiteId, popSiteId)) {
-    return {
-      ok: false,
-      status: 403,
-      error: "Ruta inválida para este punto de venta",
-      redirect: `/${popSiteId}/${popId}/menu`,
-    }
-  }
-
   const { data: permRows } = await supabase.rpc("get_user_all_permissions", {
     p_pop_id: popId,
     p_user_id: userId,
   })
-  const keys = permissionRowsToKeys(permRows)
+
   const isOwner =
     typeof pop.owner_user_id === "string" &&
     sameUserId(pop.owner_user_id, userId)
 
-  if (!keys.includes(MESAS_READ_KEY) && !isOwner) {
-    return {
-      ok: false,
-      status: 403,
-      error: "Sin permiso para esta acción en Mesas.",
-    }
+  return {
+    ok: true,
+    sidecar: {
+      popId,
+      popSiteId: siteIdFromPopRow({
+        site_id: pop.site_id as string | null | undefined,
+        settings: pop.settings,
+      }),
+      keys: permissionRowsToKeys(permRows),
+      isOwner,
+    },
+  }
+}
+
+export const requirePopSidecar: MiddlewareHandler<SidecarEnv> = async (
+  c,
+  next,
+) => {
+  const popParsed = popIdSchema.safeParse(c.req.param("popId"))
+  if (!popParsed.success) {
+    return c.json({ success: false, error: "popId inválido" }, 400)
+  }
+  const popId = popParsed.data
+
+  const gate = await loadPopSidecar(c.get("supabase"), c.get("userId"), popId)
+  if (!gate.ok) {
+    return c.json(
+      { success: false, error: gate.error, redirect: gate.redirect },
+      gate.status,
+    )
   }
 
-  return { ok: true, popSiteId }
+  c.set("sidecar", gate.sidecar)
+  await next()
 }

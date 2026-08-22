@@ -1,5 +1,6 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js"
 import { getEnv } from "../env.js"
+import { fetchWithTimeout } from "./fetchTimeout.js"
 
 export function createUserSupabaseClient(accessToken: string): SupabaseClient {
   const env = getEnv()
@@ -13,6 +14,7 @@ export function createUserSupabaseClient(accessToken: string): SupabaseClient {
       headers: {
         Authorization: `Bearer ${accessToken}`,
       },
+      fetch: fetchWithTimeout(env.SUPABASE_TIMEOUT_MS),
     },
   })
 }

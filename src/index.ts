@@ -1,58 +1,52 @@
 import { serve } from "@hono/node-server"
 import { Hono } from "hono"
-import { z } from "zod"
 import { requirePrivateAuth, type PrivateAuthEnv } from "./auth/private.js"
+import { meRoutes } from "./domains/me/routes.js"
+import { articleRoutes } from "./domains/articles/routes.js"
+import { categoryRoutes } from "./domains/categories/routes.js"
+import { dockRoutes } from "./domains/dock/routes.js"
+import { expenseCategoryRoutes } from "./domains/expense-categories/routes.js"
+import { priceListRoutes } from "./domains/price-lists/routes.js"
+import { recipeCategoryRoutes } from "./domains/recipe-categories/routes.js"
+import { serviceCategoryRoutes } from "./domains/service-categories/routes.js"
 import { getEnv } from "./env.js"
-import { requireMesasLayoutAccess } from "./lib/popAccess.js"
-import { loadMesasLayout } from "./modules/mesas/layout.js"
-
-const layoutQuerySchema = z.object({
-  siteId: z.string().trim().min(1),
-})
-
-const popIdSchema = z.string().uuid()
-
-const app = new Hono()
-
-app.get("/health", (c) => c.json({ ok: true }))
-
-const v1 = new Hono<PrivateAuthEnv>()
-v1.use("*", requirePrivateAuth)
-
-v1.get("/pops/:popId/mesas/layout", async (c) => {
-  const popParsed = popIdSchema.safeParse(c.req.param("popId"))
-  const queryParsed = layoutQuerySchema.safeParse({
-    siteId: c.req.query("siteId"),
-  })
-  if (!popParsed.success || !queryParsed.success) {
-    return c.json({ success: false, error: "Parámetros inválidos" }, 400)
-  }
-
-  const supabase = c.get("supabase")
-  const userId = c.get("userId")
-  const gate = await requireMesasLayoutAccess(
-    supabase,
-    userId,
-    popParsed.data,
-    queryParsed.data.siteId,
-  )
-  if (!gate.ok) {
-    return c.json(
-      { success: false, error: gate.error, redirect: gate.redirect },
-      gate.status,
-    )
-  }
-
-  const result = await loadMesasLayout(supabase, popParsed.data)
-  if (!result.success) {
-    return c.json(result, 500)
-  }
-  return c.json(result)
-})
-
-app.route("/v1", v1)
+import { isTimeoutError } from "./lib/fetchTimeout.js"
+import { requireRequestTimeout } from "./lib/requestTimeout.js"
+import { requirePopSidecar, type SidecarEnv } from "./sidecar/pop.js"
 
 const env = getEnv()
+const app = new Hono()
+
+app.onError((err, c) => {
+  if (c.finalized) return c.res
+  if (isTimeoutError(err)) {
+    return c.json({ success: false, error: "Timeout" }, 504)
+  }
+  return c.json({ success: false, error: "Error interno" }, 500)
+})
+
+app.get("/health", (c) => c.json({ ok: true }))
+app.get("/ping", (c) => c.json({ pong: true }))
+
+const v1 = new Hono<PrivateAuthEnv>()
+v1.use("*", requireRequestTimeout(env.REQUEST_TIMEOUT_MS))
+v1.use("*", requirePrivateAuth)
+
+v1.route("/me", meRoutes)
+
+const pop = new Hono<SidecarEnv>()
+pop.use("*", requirePopSidecar)
+pop.route("/articles", articleRoutes)
+pop.route("/categories", categoryRoutes)
+pop.route("/dock", dockRoutes)
+pop.route("/price-lists", priceListRoutes)
+pop.route("/expense-categories", expenseCategoryRoutes)
+pop.route("/recipe-categories", recipeCategoryRoutes)
+pop.route("/service-categories", serviceCategoryRoutes)
+
+v1.route("/pops/:popId", pop)
+app.route("/v1", v1)
+
 serve({ fetch: app.fetch, port: env.PORT }, (info) => {
   console.log(`rootsy-api escuchando en http://localhost:${info.port}`)
 })
