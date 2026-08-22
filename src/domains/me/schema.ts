@@ -12,6 +12,8 @@ export type MePopSubscription = {
   status: string
   planDisplayName: string
   daysRemaining: number | null
+  businessTypeName: string
+  allModules: boolean
 }
 
 export type MePop = {

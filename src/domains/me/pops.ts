@@ -78,6 +78,8 @@ function mapSubscription(raw: Record<string, unknown>): MePopSubscription {
     planDisplayName: String(raw.plan_display_name ?? ""),
     daysRemaining:
       raw.days_remaining != null ? Number(raw.days_remaining) : null,
+    businessTypeName: String(raw.business_type_name ?? ""),
+    allModules: Boolean(raw.all_modules),
   }
 }
 
