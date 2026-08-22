@@ -1,4 +1,5 @@
 import { z } from "zod"
+import type { CashRegisterClosingComparisonLine } from "./settlement.js"
 
 const isoDate = z
   .string()
@@ -274,6 +275,41 @@ export type CashRegisterSessionMoney = {
   ventasParaCierre: CashRegisterCloseCobroLine[]
   efectivoTeorico: number
   cashArqueoDifference: number | null
+}
+
+export type CashRegisterOperationSaleLine = {
+  name: string
+  quantity: number
+  unitPrice: number
+  lineTotal: number
+  discountAmount: number
+  discountLabel: string | null
+  comment: string | null
+  extras: string | null
+}
+
+export type CashRegisterSessionOperationRow = {
+  id: string
+  kind: "sale" | "deposit" | "withdrawal"
+  saleId: string | null
+  occurredAt: string
+  operationLabel: string
+  customerLabel: string
+  detail: string
+  paymentMethodLabel: string
+  amount: number
+  lines: CashRegisterOperationSaleLine[]
+  showLines: boolean
+  generalDiscountAmount: number
+}
+
+export type CashRegisterSessionArqueoDetail = {
+  registerName: string
+  popName: string
+  session: CashRegisterSummarySession
+  closingComparison: CashRegisterClosingComparisonLine[]
+  hasAccountingEntry: boolean
+  operations: CashRegisterSessionOperationRow[]
 }
 
 export type CashRegisterTotalsData = {

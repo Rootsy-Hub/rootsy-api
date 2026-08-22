@@ -50,7 +50,7 @@ function computeSessionEfectivoTeorico(session: {
   )
 }
 
-function buildClosingComparisonForSession(session: CashRegisterSummarySession) {
+export function buildClosingComparisonForSession(session: CashRegisterSummarySession) {
   const cs = session.closingSnapshot
   if (!cs) return []
   if (cs.treasury_lines && Object.keys(cs.treasury_lines).length > 0) {

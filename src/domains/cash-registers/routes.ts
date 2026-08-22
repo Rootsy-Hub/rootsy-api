@@ -27,6 +27,7 @@ import {
   periodQuerySchema,
   updateCashRegisterBodySchema,
 } from "./schema.js"
+import { getCashRegisterSessionArqueo } from "./arqueo.js"
 import { getCashRegisterPage, getCashRegisterTotals } from "./summary.js"
 
 export const cashRegisterRoutes = new Hono<SidecarEnv>()
@@ -141,6 +142,28 @@ cashRegisterRoutes.post("/", requireAnyPermission(CASH_REGISTER_CREATE), async (
   if (!result.success) return c.json(result, result.status)
   return c.json(result, 201)
 })
+
+cashRegisterRoutes.get(
+  "/sessions/:sessionId/arqueo",
+  requireAnyPermission(CASH_REGISTER_READ),
+  async (c) => {
+    const sessionId = idSchema.safeParse(c.req.param("sessionId"))
+    if (!sessionId.success) {
+      return c.json({ success: false, error: "Turno inválido" }, 400)
+    }
+    const sidecar = c.get("sidecar")
+    const result = await getCashRegisterSessionArqueo(
+      c.get("supabase"),
+      sidecar.popId,
+      sidecar.popSiteId,
+      sessionId.data,
+      sidecar.keys,
+      sidecar.isOwner,
+    )
+    if (!result.success) return c.json(result, result.status)
+    return c.json(result)
+  },
+)
 
 cashRegisterRoutes.post(
   "/sessions/:sessionId/close",
