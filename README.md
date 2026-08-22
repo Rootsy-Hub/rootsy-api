@@ -40,11 +40,23 @@ Queda en `http://localhost:8787`.
 - `GET|PATCH|DELETE /v1/pops/:popId/recipe-categories/:categoryId` — detalle (incluye recipeCount)
 - `GET|POST /v1/pops/:popId/comanda-stations` — estaciones de comanda
 - `GET|PATCH|DELETE /v1/pops/:popId/comanda-stations/:stationId` — detalle (incluye categoryCount)
-- `GET /v1/pops/:popId/service-categories` — servicios
+- `GET|POST /v1/pops/:popId/service-categories` — categorías de servicios
+- `GET|PATCH|DELETE /v1/pops/:popId/service-categories/:categoryId` — detalle / editar / borrar
+- `GET|POST /v1/pops/:popId/services` — listar / crear servicios (artículos y adicionales)
+- `POST /v1/pops/:popId/services/image` — foto WebP
+- `GET /v1/pops/:popId/services/articles` — buscar artículos (`?q=`). Tope 5
+- `GET|PATCH|DELETE /v1/pops/:popId/services/:serviceId` — detalle / editar / borrar
 - `GET /v1/pops/:popId/suppliers` — proveedores activos (id, nombre). `?q=` busca por nombre o CUIT
 - `GET /v1/pops/:popId/suppliers/table` — listado paginado de proveedores
 - `POST /v1/pops/:popId/suppliers` — crear proveedor
 - `PATCH|DELETE /v1/pops/:popId/suppliers/:supplierId` — editar / borrar
+- `GET /v1/pops/:popId/invoices` — listado paginado de facturas ARCA (`q`, `status`, `cbteTipo`, `dateFrom`, `dateTo`, sort)
+- `GET|POST /v1/pops/:popId/arca-sale-points` — CUIT fiscal + puntos de venta ARCA
+- `GET|PATCH /v1/pops/:popId/arca-sale-points/:salePointId` — detalle / editar (nro y metadatos del certificado)
+- `GET|POST /v1/pops/:popId/quotes` — listar / crear presupuestos (`q`, `dateFrom`, `dateTo`)
+- `GET|DELETE /v1/pops/:popId/quotes/:quoteId` — detalle / borrar
+- `GET|POST /v1/pops/:popId/purchase-orders` — listar / crear órdenes de compra (`q`, `dateFrom`, `dateTo`)
+- `GET|DELETE /v1/pops/:popId/purchase-orders/:orderId` — detalle / borrar
 
 Rutas privadas piden:
 

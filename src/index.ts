@@ -13,7 +13,14 @@ import { recipeCategoryRoutes } from "./domains/recipe-categories/routes.js"
 import { promotionRoutes } from "./domains/promotions/routes.js"
 import { recipeRoutes } from "./domains/recipes/routes.js"
 import { serviceCategoryRoutes } from "./domains/service-categories/routes.js"
+import { serviceRoutes } from "./domains/services/routes.js"
 import { supplierRoutes } from "./domains/suppliers/routes.js"
+import { invoiceRoutes } from "./domains/invoices/routes.js"
+import { arcaSalePointRoutes } from "./domains/arca-sale-points/routes.js"
+import { quoteRoutes } from "./domains/quotes/routes.js"
+import { purchaseOrderRoutes } from "./domains/purchase-orders/routes.js"
+import { checkRoutes } from "./domains/checks/routes.js"
+import { settingsRoutes } from "./domains/settings/routes.js"
 import { getEnv } from "./env.js"
 import { isTimeoutError } from "./lib/fetchTimeout.js"
 import { requireRequestTimeout } from "./lib/requestTimeout.js"
@@ -52,7 +59,14 @@ pop.route("/recipe-categories", recipeCategoryRoutes)
 pop.route("/promotions", promotionRoutes)
 pop.route("/recipes", recipeRoutes)
 pop.route("/service-categories", serviceCategoryRoutes)
+pop.route("/services", serviceRoutes)
 pop.route("/suppliers", supplierRoutes)
+pop.route("/invoices", invoiceRoutes)
+pop.route("/arca-sale-points", arcaSalePointRoutes)
+pop.route("/quotes", quoteRoutes)
+pop.route("/purchase-orders", purchaseOrderRoutes)
+pop.route("/checks", checkRoutes)
+pop.route("/settings", settingsRoutes)
 
 v1.route("/pops/:popId", pop)
 app.route("/v1", v1)
