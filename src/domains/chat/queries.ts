@@ -350,6 +350,20 @@ async function replaceMembers(
   return { success: true }
 }
 
+export async function listChatChannelMemberIds(
+  supabase: SupabaseClient,
+  popId: string,
+  channelId: string,
+): Promise<string[]> {
+  const { data, error } = await supabase
+    .from("pop_chat_channel_members")
+    .select("user_id")
+    .eq("pop_id", popId)
+    .eq("channel_id", channelId)
+  if (error || !data) return []
+  return uniqueIds(data.map((row) => String(row.user_id)))
+}
+
 export async function getChatWorkspace(
   supabase: SupabaseClient,
   popId: string,

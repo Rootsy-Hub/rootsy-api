@@ -19,6 +19,8 @@ export type DomainEvent = {
   resource?: RealtimeResourceRef
   payload: Record<string, unknown>
   require?: { permissions?: string[] }
+  /** Si está, solo esos userIds reciben el evento. El owner no bypasea. */
+  visibleTo?: string[]
   channels?: string[]
 }
 

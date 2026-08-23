@@ -8,10 +8,12 @@ import {
   deleteChatChannel,
   getChatChannel,
   getChatWorkspace,
+  listChatChannelMemberIds,
   markChatChannelRead,
   sendChatMessage,
   updateChatChannel,
 } from "./queries.js"
+import { chatMessagePayload, publishChatEvent } from "./realtime.js"
 import {
   createChannelBodySchema,
   sendMessageBodySchema,
@@ -64,6 +66,17 @@ chatRoutes.post("/", requireAnyPermission([...CHAT_READ, ...CHAT_CREATE]), async
     body.data,
   )
   if (!result.success) return c.json(result, result.status)
+  const visibleTo = await listChatChannelMemberIds(
+    c.get("supabase"),
+    c.get("sidecar").popId,
+    result.data.id,
+  )
+  void publishChatEvent(c, {
+    type: "chat.created",
+    channelId: result.data.id,
+    visibleTo,
+    payload: { channelId: result.data.id },
+  }).catch(() => undefined)
   return c.json(result, 201)
 })
 
@@ -106,6 +119,17 @@ chatRoutes.post(
       body.data.body,
     )
     if (!result.success) return c.json(result, result.status)
+    const visibleTo = await listChatChannelMemberIds(
+      c.get("supabase"),
+      c.get("sidecar").popId,
+      id.data,
+    )
+    void publishChatEvent(c, {
+      type: "chat.message",
+      channelId: id.data,
+      visibleTo,
+      payload: chatMessagePayload(id.data, result.data),
+    }).catch(() => undefined)
     return c.json(result, 201)
   },
 )
@@ -156,14 +180,24 @@ chatRoutes.patch(
     await c.req.json().catch(() => null),
   )
   if (!body.success) return c.json(bodyError(body.error.issues), 400)
+  const supabase = c.get("supabase")
+  const popId = c.get("sidecar").popId
+  const before = await listChatChannelMemberIds(supabase, popId, id.data)
   const result = await updateChatChannel(
-    c.get("supabase"),
-    c.get("sidecar").popId,
+    supabase,
+    popId,
     c.get("userId"),
     id.data,
     body.data,
   )
   if (!result.success) return c.json(result, result.status)
+  const after = await listChatChannelMemberIds(supabase, popId, id.data)
+  void publishChatEvent(c, {
+    type: "chat.updated",
+    channelId: id.data,
+    visibleTo: [...new Set([...before, ...after])],
+    payload: { channelId: id.data },
+  }).catch(() => undefined)
   return c.json(result)
 })
 
@@ -172,11 +206,16 @@ chatRoutes.delete("/:channelId", requireAnyPermission(CHAT_DELETE), async (c) =>
   if (!id.success) {
     return c.json({ success: false, error: "channelId inválido" }, 400)
   }
-  const result = await deleteChatChannel(
-    c.get("supabase"),
-    c.get("sidecar").popId,
-    id.data,
-  )
+  const supabase = c.get("supabase")
+  const popId = c.get("sidecar").popId
+  const visibleTo = await listChatChannelMemberIds(supabase, popId, id.data)
+  const result = await deleteChatChannel(supabase, popId, id.data)
   if (!result.success) return c.json(result, result.status)
+  void publishChatEvent(c, {
+    type: "chat.deleted",
+    channelId: id.data,
+    visibleTo,
+    payload: { channelId: id.data },
+  }).catch(() => undefined)
   return c.json(result)
 })

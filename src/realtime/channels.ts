@@ -105,6 +105,11 @@ export function canReceiveEvent(
   event: DomainEvent,
   eventChannels: string[],
 ): boolean {
+  if (event.visibleTo) {
+    const allowed = event.visibleTo.some((id) => sameUserId(id, session.userId))
+    if (!allowed) return false
+  }
+
   if (event.require?.permissions?.length) {
     if (
       !session.isOwner &&

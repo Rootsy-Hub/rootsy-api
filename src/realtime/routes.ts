@@ -31,6 +31,7 @@ const publishBodySchema = z.object({
     })
     .optional(),
   channels: z.array(z.string().min(1).max(160)).max(16).optional(),
+  visibleTo: z.array(z.string().uuid()).max(64).optional(),
 })
 
 export const realtimeWsRoutes = new Hono<RealtimeSessionEnv>()
@@ -101,6 +102,7 @@ realtimePublishRoutes.post("/events", async (c) => {
     resource: parsed.data.resource,
     require: parsed.data.require,
     channels: parsed.data.channels,
+    visibleTo: parsed.data.visibleTo,
   }
 
   const result = await publishDomainEvent(c.env, event)
