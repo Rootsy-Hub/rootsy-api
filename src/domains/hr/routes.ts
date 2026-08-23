@@ -4,6 +4,12 @@ import type { SidecarEnv } from "../../sidecar/pop.js"
 import { hasAnyPermission, requireAnyPermission } from "../../sidecar/permissions.js"
 import { HR_READ, HR_WRITE } from "./allowlist.js"
 import {
+  getClockStation,
+  rotateClockStationPin,
+  unlockClockStation,
+} from "./clockStation.js"
+import {
+  clockEmployeeByPin,
   clockEmployeeIn,
   clockEmployeeOut,
   getEmployeeDetail,
@@ -11,6 +17,7 @@ import {
   markEmployeeLeft,
   markEmployeeReturned,
   removeEmployeeFranco,
+  rotateEmployeeClockPin,
   upsertEmployee,
 } from "./employees.js"
 import { loadHrPaymentContext, recordEmployeePayment } from "./payments.js"
@@ -26,6 +33,7 @@ import {
 } from "./members.js"
 import { createRole, deleteRole, getRoleEditor, saveRolePermissions } from "./roles.js"
 import {
+  clockByPinBodySchema,
   createRoleBodySchema,
   francoBodySchema,
   inviteBodySchema,
@@ -185,6 +193,93 @@ hrRoutes.post(
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
+  },
+)
+
+hrRoutes.get("/clock-station", requireAnyPermission(HR_READ), async (c) => {
+  const sidecar = c.get("sidecar")
+  const result = await getClockStation(
+    c.get("supabase"),
+    sidecar.popId,
+    sidecar.keys,
+    sidecar.isOwner,
+  )
+  if (!result.success) return c.json(result, result.status)
+  return c.json({ success: true, data: result.data })
+})
+
+hrRoutes.post(
+  "/clock-station/unlock",
+  requireAnyPermission(HR_READ),
+  async (c) => {
+    const body = clockByPinBodySchema.safeParse(await c.req.json().catch(() => null))
+    if (!body.success) return c.json(bodyError(body.error.issues), 400)
+    const result = await unlockClockStation(
+      c.get("supabase"),
+      c.get("sidecar").popId,
+      body.data.pin,
+    )
+    if (!result.success) return c.json(result, result.status)
+    return c.json(result)
+  },
+)
+
+hrRoutes.post(
+  "/clock-station/pin",
+  requireAnyPermission(HR_WRITE),
+  async (c) => {
+    const result = await rotateClockStationPin(
+      c.get("supabase"),
+      c.get("sidecar").popId,
+    )
+    if (!result.success) return c.json(result, result.status)
+    return c.json({
+      success: true,
+      data: { clockStationPin: result.clockStationPin },
+    })
+  },
+)
+
+hrRoutes.post(
+  "/clock",
+  requireAnyPermission(HR_READ),
+  async (c) => {
+    const body = clockByPinBodySchema.safeParse(await c.req.json().catch(() => null))
+    if (!body.success) return c.json(bodyError(body.error.issues), 400)
+    const sidecar = c.get("sidecar")
+    const result = await clockEmployeeByPin(
+      c.get("supabase"),
+      sidecar.popId,
+      sidecar.popSiteId,
+      body.data.pin,
+    )
+    if (!result.success) return c.json(result, result.status)
+    return c.json({
+      success: true,
+      data: {
+        action: result.action,
+        firstName: result.firstName,
+        lastName: result.lastName,
+      },
+    })
+  },
+)
+
+hrRoutes.post(
+  "/employees/:employeeId/clock-pin",
+  requireAnyPermission(HR_WRITE),
+  async (c) => {
+    const employeeId = idSchema.safeParse(c.req.param("employeeId"))
+    if (!employeeId.success) {
+      return c.json({ success: false, error: "Persona inválida" }, 400)
+    }
+    const result = await rotateEmployeeClockPin(
+      c.get("supabase"),
+      c.get("sidecar").popId,
+      employeeId.data,
+    )
+    if (!result.success) return c.json(result, result.status)
+    return c.json({ success: true, data: { clockPin: result.clockPin } })
   },
 )
 

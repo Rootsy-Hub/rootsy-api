@@ -8,8 +8,10 @@ import {
 import { asCalendarDay } from "./ids.js"
 import {
   CALENDAR_DAY_RE,
+  CLOCK_PIN_RE,
   parseSalaryInput,
   type AttendancePunchRow,
+  type ClockByPinData,
   type EmployeeDetailData,
   type EmployeePaymentRow,
   type EmployeeRow,
@@ -35,6 +37,7 @@ type EmployeeDbRow = {
   hired_at: string | null
   left_at: string | null
   notes: string | null
+  clock_pin?: string | null
 }
 
 const EMPLOYEE_SELECT =
@@ -63,7 +66,39 @@ function mapEmployee(
     notes: row.notes,
     isClockedIn: openByEmployee.has(row.id),
     clockedInAt: openByEmployee.get(row.id) ?? null,
+    clockPin: null,
   }
+}
+
+const DETAIL_EMPLOYEE_SELECT = `${EMPLOYEE_SELECT}, clock_pin`
+
+function randomClockPin(): string {
+  return String(Math.floor(1000 + Math.random() * 9000))
+}
+
+async function allocateClockPin(
+  supabase: SupabaseClient,
+  popId: string,
+  reserved: Set<string> = new Set(),
+  excludeEmployeeId?: string,
+): Promise<string | null> {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const pin = randomClockPin()
+    if (reserved.has(pin)) continue
+    let query = supabase
+      .from("pop_employees")
+      .select("id")
+      .eq("pop_id", popId)
+      .eq("clock_pin", pin)
+      .is("left_at", null)
+    if (excludeEmployeeId) query = query.neq("id", excludeEmployeeId)
+    const { data } = await query.maybeSingle()
+    if (!data) {
+      reserved.add(pin)
+      return pin
+    }
+  }
+  return null
 }
 
 function isEmployeeStubName(firstName: string | null, lastName: string | null) {
@@ -135,7 +170,7 @@ export async function getEmployeeDetail(
 > {
   const { data: row, error } = await supabase
     .from("pop_employees")
-    .select(EMPLOYEE_SELECT)
+    .select(DETAIL_EMPLOYEE_SELECT)
     .eq("pop_id", popId)
     .eq("id", employeeId)
     .maybeSingle()
@@ -214,6 +249,13 @@ export async function getEmployeeDetail(
   const openPunch = punches.find((punch) => punch.clockedOutAt == null)
   const openByEmployee = new Map<string, string>()
   if (openPunch) openByEmployee.set(String(row.id), openPunch.clockedInAt)
+  const canManagePeople =
+    isOwner || hasAnyPermission(keys, ["hr:create", "hr:update"], false)
+  const employee = mapEmployee(row as EmployeeDbRow, openByEmployee)
+  if (canManagePeople && !employee.leftAt) {
+    const pin = (row as EmployeeDbRow).clock_pin
+    employee.clockPin = typeof pin === "string" && CLOCK_PIN_RE.test(pin) ? pin : null
+  }
 
   let imageUrl: string | null = null
   if (row.user_id) {
@@ -228,13 +270,12 @@ export async function getEmployeeDetail(
   return {
     success: true,
     data: {
-      employee: mapEmployee(row as EmployeeDbRow, openByEmployee),
+      employee,
       punches,
       francos,
       payments,
       imageUrl,
-      canManagePeople:
-        isOwner || hasAnyPermission(keys, ["hr:create", "hr:update"], false),
+      canManagePeople,
     },
   }
 }
@@ -286,15 +327,20 @@ export async function ensureEmployeesFromMembers(
   const ownerStubs = missing.filter((member) => member.isOwner)
   if (ownerStubs.length === 0) return
 
-  await supabase.from("pop_employees").insert(
-    ownerStubs.map((member) => ({
+  const reservedPins = new Set<string>()
+  const ownerRows: Array<Record<string, string | null>> = []
+  for (const member of ownerStubs) {
+    const clockPin = await allocateClockPin(supabase, popId, reservedPins)
+    ownerRows.push({
       pop_id: popId,
       user_id: member.userId,
       first_name: member.firstName.trim() || "Persona",
       last_name: member.lastName.trim(),
       job_title: "Dueño",
-    })),
-  )
+      clock_pin: clockPin,
+    })
+  }
+  await supabase.from("pop_employees").insert(ownerRows)
 }
 
 export async function upsertEmployee(
@@ -347,9 +393,18 @@ export async function upsertEmployee(
     return { success: true, id: input.id }
   }
 
+  const clockPin = await allocateClockPin(supabase, popId)
+  if (!clockPin) {
+    return {
+      success: false,
+      error: "No se pudo generar un PIN de fichaje.",
+      status: 500,
+    }
+  }
+
   const { data, error } = await supabase
     .from("pop_employees")
-    .insert(payload)
+    .insert({ ...payload, clock_pin: clockPin })
     .select("id")
     .single()
   if (error || !data) {
@@ -398,7 +453,7 @@ export async function markEmployeeReturned(
 ): Promise<MutateResult> {
   const { data: employee, error: lookErr } = await supabase
     .from("pop_employees")
-    .select("id, left_at")
+    .select("id, left_at, clock_pin")
     .eq("pop_id", popId)
     .eq("id", employeeId)
     .maybeSingle()
@@ -410,9 +465,36 @@ export async function markEmployeeReturned(
     return { success: false, error: "Esa persona ya está en el equipo.", status: 400 }
   }
 
+  const currentPin =
+    typeof employee.clock_pin === "string" && CLOCK_PIN_RE.test(employee.clock_pin)
+      ? employee.clock_pin
+      : null
+  let nextPin = currentPin
+  if (currentPin) {
+    const { data: conflict } = await supabase
+      .from("pop_employees")
+      .select("id")
+      .eq("pop_id", popId)
+      .eq("clock_pin", currentPin)
+      .is("left_at", null)
+      .neq("id", employeeId)
+      .maybeSingle()
+    if (conflict) nextPin = null
+  }
+  if (!nextPin) {
+    nextPin = await allocateClockPin(supabase, popId, new Set(), employeeId)
+    if (!nextPin) {
+      return {
+        success: false,
+        error: "No se pudo generar un PIN de fichaje.",
+        status: 500,
+      }
+    }
+  }
+
   const { error } = await supabase
     .from("pop_employees")
-    .update({ left_at: null })
+    .update({ left_at: null, clock_pin: nextPin })
     .eq("pop_id", popId)
     .eq("id", employeeId)
   if (error) return { success: false, error: error.message, status: 500 }
@@ -492,6 +574,98 @@ export async function clockEmployeeOut(
     return { success: false, error: "No está marcada la entrada.", status: 400 }
   }
   return { success: true }
+}
+
+export async function clockEmployeeByPin(
+  supabase: SupabaseClient,
+  popId: string,
+  popSiteId: string,
+  pinRaw: string,
+): Promise<
+  | ({ success: true } & ClockByPinData)
+  | { success: false; error: string; status: 400 | 404 | 409 | 500 }
+> {
+  const pin = pinRaw.trim()
+  if (!CLOCK_PIN_RE.test(pin)) {
+    return { success: false, error: "PIN incorrecto.", status: 400 }
+  }
+
+  const { data: employee, error: lookErr } = await supabase
+    .from("pop_employees")
+    .select("id, first_name, last_name")
+    .eq("pop_id", popId)
+    .eq("clock_pin", pin)
+    .is("left_at", null)
+    .maybeSingle()
+  if (lookErr) return { success: false, error: lookErr.message, status: 500 }
+  if (!employee) {
+    return { success: false, error: "PIN incorrecto.", status: 400 }
+  }
+
+  const { data: openPunch, error: openErr } = await supabase
+    .from("pop_employee_attendance")
+    .select("id")
+    .eq("pop_id", popId)
+    .eq("employee_id", employee.id)
+    .is("clocked_out_at", null)
+    .maybeSingle()
+  if (openErr) return { success: false, error: openErr.message, status: 500 }
+
+  const result = openPunch
+    ? await clockEmployeeOut(supabase, popId, String(employee.id))
+    : await clockEmployeeIn(supabase, popId, popSiteId, String(employee.id))
+  if (!result.success) return result
+
+  return {
+    success: true,
+    action: openPunch ? "out" : "in",
+    firstName: String(employee.first_name ?? ""),
+    lastName: String(employee.last_name ?? ""),
+  }
+}
+
+export async function rotateEmployeeClockPin(
+  supabase: SupabaseClient,
+  popId: string,
+  employeeId: string,
+): Promise<
+  | { success: true; clockPin: string }
+  | { success: false; error: string; status: 400 | 404 | 500 }
+> {
+  const { data: employee, error: lookErr } = await supabase
+    .from("pop_employees")
+    .select("id, left_at")
+    .eq("pop_id", popId)
+    .eq("id", employeeId)
+    .maybeSingle()
+  if (lookErr) return { success: false, error: lookErr.message, status: 500 }
+  if (!employee) {
+    return { success: false, error: "No encontramos a esa persona.", status: 404 }
+  }
+  if (employee.left_at) {
+    return {
+      success: false,
+      error: "Esa persona ya no trabaja en este local.",
+      status: 400,
+    }
+  }
+
+  const clockPin = await allocateClockPin(supabase, popId, new Set(), employeeId)
+  if (!clockPin) {
+    return {
+      success: false,
+      error: "No se pudo generar un PIN de fichaje.",
+      status: 500,
+    }
+  }
+
+  const { error } = await supabase
+    .from("pop_employees")
+    .update({ clock_pin: clockPin })
+    .eq("pop_id", popId)
+    .eq("id", employeeId)
+  if (error) return { success: false, error: error.message, status: 500 }
+  return { success: true, clockPin }
 }
 
 export async function markEmployeeFranco(

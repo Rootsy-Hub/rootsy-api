@@ -22,6 +22,12 @@ export const francoBodySchema = z.object({
   kind: z.enum(DAY_MARK_KINDS).default("franco"),
 })
 
+export const CLOCK_PIN_RE = /^\d{4}$/
+
+export const clockByPinBodySchema = z.object({
+  pin: z.string(),
+})
+
 export const EMPLOYEE_PAYMENT_KINDS = [
   "cash",
   "card_debit",
@@ -79,6 +85,15 @@ export type EmployeeRow = {
   notes: string | null
   isClockedIn: boolean
   clockedInAt: string | null
+  clockPin: string | null
+}
+
+export type ClockByPinAction = "in" | "out"
+
+export type ClockByPinData = {
+  action: ClockByPinAction
+  firstName: string
+  lastName: string
 }
 
 export type AttendancePunchRow = {

@@ -30,6 +30,7 @@ import { statisticsRoutes } from "./domains/statistics/routes.js"
 import { treasuryRoutes } from "./domains/treasury/routes.js"
 import { settingsRoutes } from "./domains/settings/routes.js"
 import { hrRoutes } from "./domains/hr/routes.js"
+import { chatRoutes } from "./domains/chat/routes.js"
 import { getEnv } from "./env.js"
 import { isTimeoutError } from "./lib/fetchTimeout.js"
 import { requireRequestTimeout } from "./lib/requestTimeout.js"
@@ -94,6 +95,7 @@ export function createApp() {
   pop.route("/treasury", treasuryRoutes)
   pop.route("/settings", settingsRoutes)
   pop.route("/hr", hrRoutes)
+  pop.route("/chat", chatRoutes)
   pop.route("/realtime", realtimePublishRoutes)
 
   v1.route("/pops/:popId", pop)
