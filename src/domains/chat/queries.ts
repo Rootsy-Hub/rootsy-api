@@ -3,10 +3,13 @@ import { hasAnyPermission } from "../../sidecar/permissions.js"
 import { CHAT_CREATE, CHAT_DELETE, CHAT_READ, CHAT_UPDATE } from "./allowlist.js"
 import {
   CHAT_CHANNEL_LIMIT,
+  CHAT_MESSAGE_PAGE_SIZE,
   type ChatChannelDetailData,
   type ChatChannelListItem,
   type ChatEligibleUser,
+  type ChatMessageCursor,
   type ChatMessageRow,
+  type ChatMessagesPage,
   type ChatRoleOption,
   type ChatWorkspaceData,
   type CreateChannelBody,
@@ -80,8 +83,33 @@ type ChannelDb = {
   slug: string
   title: string
   subtitle: string | null
+  image_url: string | null
   last_message_at: string | null
   last_message_body: string | null
+}
+
+type MessageDb = {
+  id: string
+  author_user_id: string
+  author_name: string | null
+  body: string | null
+  created_at: string
+}
+
+function mapMessage(row: MessageDb, userId: string): ChatMessageRow {
+  return {
+    id: String(row.id),
+    authorUserId: String(row.author_user_id),
+    authorName: String(row.author_name ?? ""),
+    body: String(row.body ?? ""),
+    createdAt: String(row.created_at),
+    mine: sameUserId(String(row.author_user_id), userId),
+  }
+}
+
+function isOlderThanCursor(row: MessageDb, cursor: ChatMessageCursor): boolean {
+  if (row.created_at < cursor.createdAt) return true
+  return row.created_at === cursor.createdAt && String(row.id) < cursor.id
 }
 
 function mapChannel(
@@ -96,6 +124,10 @@ function mapChannel(
     subtitle: row.subtitle != null && String(row.subtitle).trim()
       ? String(row.subtitle)
       : null,
+    imageUrl:
+      row.image_url != null && String(row.image_url).trim()
+        ? String(row.image_url)
+        : null,
     initials: channelInitials(String(row.title ?? "")),
     isEquipo: String(row.slug ?? "") === "equipo",
     lastMessageAt: row.last_message_at ?? null,
@@ -380,7 +412,7 @@ export async function getChatWorkspace(
   const [{ data: rows, error }, { data: countRaw }] = await Promise.all([
     supabase
       .from("pop_chat_channels")
-      .select("id, slug, title, subtitle, last_message_at, last_message_body")
+      .select("id, slug, title, subtitle, image_url, last_message_at, last_message_body")
       .eq("pop_id", popId)
       .order("sort_order", { ascending: true })
       .order("title", { ascending: true }),
@@ -423,7 +455,7 @@ export async function getChatWorkspace(
 export async function getChatChannel(
   supabase: SupabaseClient,
   popId: string,
-  userId: string,
+  _userId: string,
   channelId: string,
 ): Promise<
   | { success: true; data: ChatChannelDetailData }
@@ -431,7 +463,7 @@ export async function getChatChannel(
 > {
   const { data: row, error } = await supabase
     .from("pop_chat_channels")
-    .select("id, slug, title, subtitle, last_message_at, last_message_body")
+    .select("id, slug, title, subtitle, image_url, last_message_at, last_message_body")
     .eq("pop_id", popId)
     .eq("id", channelId)
     .maybeSingle()
@@ -439,21 +471,11 @@ export async function getChatChannel(
   if (error) return { success: false, error: error.message, status: 500 }
   if (!row) return { success: false, error: "Canal no encontrado.", status: 404 }
 
-  const [{ data: messages, error: msgErr }, { data: members, error: memErr }] =
-    await Promise.all([
-      supabase
-        .from("pop_chat_messages")
-        .select("id, author_user_id, author_name, body, created_at")
-        .eq("channel_id", channelId)
-        .order("created_at", { ascending: true })
-        .limit(200),
-      supabase
-        .from("pop_chat_channel_members")
-        .select("user_id")
-        .eq("channel_id", channelId),
-    ])
+  const { data: members, error: memErr } = await supabase
+    .from("pop_chat_channel_members")
+    .select("user_id")
+    .eq("channel_id", channelId)
 
-  if (msgErr) return { success: false, error: msgErr.message, status: 500 }
   if (memErr) return { success: false, error: memErr.message, status: 500 }
 
   const memberUserIds = (members || []).map((item) => String(item.user_id))
@@ -464,20 +486,70 @@ export async function getChatChannel(
     data: {
       channel: mapped,
       memberUserIds,
-      messages: ((messages || []) as {
-        id: string
-        author_user_id: string
-        author_name: string
-        body: string
-        created_at: string
-      }[]).map((message) => ({
-        id: String(message.id),
-        authorUserId: String(message.author_user_id),
-        authorName: String(message.author_name ?? ""),
-        body: String(message.body ?? ""),
-        createdAt: String(message.created_at),
-        mine: sameUserId(String(message.author_user_id), userId),
-      })) satisfies ChatMessageRow[],
+    },
+  }
+}
+
+export async function listChatMessages(
+  supabase: SupabaseClient,
+  popId: string,
+  userId: string,
+  channelId: string,
+  input: { limit?: number; before?: string; beforeId?: string },
+): Promise<
+  | { success: true; data: ChatMessagesPage }
+  | { success: false; error: string; status: 404 | 500 }
+> {
+  const { data: channel, error: channelErr } = await supabase
+    .from("pop_chat_channels")
+    .select("id")
+    .eq("pop_id", popId)
+    .eq("id", channelId)
+    .maybeSingle()
+
+  if (channelErr) return { success: false, error: channelErr.message, status: 500 }
+  if (!channel) return { success: false, error: "Canal no encontrado.", status: 404 }
+
+  const limit = input.limit ?? CHAT_MESSAGE_PAGE_SIZE
+  const cursor =
+    input.before && input.beforeId
+      ? { createdAt: input.before, id: input.beforeId }
+      : input.before
+        ? { createdAt: input.before, id: "" }
+        : null
+
+  let query = supabase
+    .from("pop_chat_messages")
+    .select("id, author_user_id, author_name, body, created_at")
+    .eq("channel_id", channelId)
+    .order("created_at", { ascending: false })
+    .order("id", { ascending: false })
+    .limit(limit + 1)
+
+  if (cursor) {
+    query = query.lte("created_at", cursor.createdAt)
+  }
+
+  const { data, error } = await query
+  if (error) return { success: false, error: error.message, status: 500 }
+
+  const rows = ((data || []) as MessageDb[]).filter((row) =>
+    cursor ? isOlderThanCursor(row, cursor) : true,
+  )
+  const hasMore = rows.length > limit
+  const page = rows.slice(0, limit)
+  const messages = [...page].reverse().map((row) => mapMessage(row, userId))
+  const oldest = messages[0] ?? null
+
+  return {
+    success: true,
+    data: {
+      messages,
+      hasMore,
+      nextCursor:
+        hasMore && oldest
+          ? { createdAt: oldest.createdAt, id: oldest.id }
+          : null,
     },
   }
 }
@@ -504,6 +576,7 @@ export async function createChatChannel(
 
   const title = input.title.trim()
   const subtitle = input.subtitle?.trim() ? input.subtitle.trim() : null
+  const imageUrl = input.imageUrl?.trim() ? input.imageUrl.trim() : null
   let slug = slugify(title)
   if (slug === "equipo") slug = "canal-equipo"
 
@@ -525,6 +598,7 @@ export async function createChatChannel(
       slug,
       title,
       subtitle,
+      image_url: imageUrl,
       sort_order: 10,
     })
     .select("id")
@@ -586,6 +660,9 @@ export async function updateChatChannel(
   if (!isEquipo && input.title != null) patch.title = input.title.trim()
   if (input.subtitle !== undefined) {
     patch.subtitle = input.subtitle?.trim() ? input.subtitle.trim() : null
+  }
+  if (input.imageUrl !== undefined) {
+    patch.image_url = input.imageUrl?.trim() ? input.imageUrl.trim() : null
   }
   if (Object.keys(patch).length > 0) {
     const { error: updErr } = await supabase

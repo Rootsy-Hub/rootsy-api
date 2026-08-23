@@ -2,20 +2,32 @@ import { z } from "zod"
 
 export const CHAT_CHANNEL_LIMIT = 8
 
+const imageUrlField = z.string().max(2000).nullable().optional()
+
 export const createChannelBodySchema = z.object({
   title: z.string().trim().min(1, "El nombre es obligatorio.").max(48),
   subtitle: z.string().max(80).optional().nullable(),
+  imageUrl: imageUrlField,
   userIds: z.array(z.string().uuid()).min(1, "Elegí al menos una persona."),
 })
 
 export const updateChannelBodySchema = z.object({
   title: z.string().trim().min(1).max(48).optional(),
   subtitle: z.string().max(80).optional().nullable(),
+  imageUrl: imageUrlField,
   userIds: z.array(z.string().uuid()).min(1).optional(),
 })
 
 export const sendMessageBodySchema = z.object({
   body: z.string().trim().min(1, "Escribí un mensaje.").max(2000),
+})
+
+export const CHAT_MESSAGE_PAGE_SIZE = 40
+
+export const listMessagesQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(80).optional(),
+  before: z.string().min(8).max(64).optional(),
+  beforeId: z.string().uuid().optional(),
 })
 
 export type CreateChannelBody = z.infer<typeof createChannelBodySchema>
@@ -40,6 +52,7 @@ export type ChatChannelListItem = {
   slug: string
   title: string
   subtitle: string | null
+  imageUrl: string | null
   initials: string
   isEquipo: boolean
   lastMessageAt: string | null
@@ -71,6 +84,16 @@ export type ChatWorkspaceData = {
 
 export type ChatChannelDetailData = {
   channel: ChatChannelListItem
-  messages: ChatMessageRow[]
   memberUserIds: string[]
+}
+
+export type ChatMessageCursor = {
+  createdAt: string
+  id: string
+}
+
+export type ChatMessagesPage = {
+  messages: ChatMessageRow[]
+  hasMore: boolean
+  nextCursor: ChatMessageCursor | null
 }

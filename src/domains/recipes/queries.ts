@@ -26,6 +26,8 @@ const RECIPE_SELECT = `
   image_url,
   is_active,
   allow_negative_stock,
+  output_article_id,
+  articles!recipes_output_article_id_fkey ( id, name, unit_of_measure ),
   recipe_categories ( name )
 `
 
@@ -72,9 +74,15 @@ function mapRecipeRow(
   listPrices: RecipeListPriceRow[] = [],
 ): RecipeRow {
   const cat = row.recipe_categories as { name?: string } | null
+  const outArt = row.articles as { id?: string; name?: string } | null
   const rawImg = row.image_url
   const imageUrl =
     typeof rawImg === "string" && rawImg.trim() !== "" ? rawImg.trim() : null
+  const outputArticleId = row.output_article_id
+    ? String(row.output_article_id)
+    : outArt?.id
+      ? String(outArt.id)
+      : null
   return {
     id: String(row.id),
     name: String(row.name ?? ""),
@@ -88,6 +96,8 @@ function mapRecipeRow(
     ingredientCount,
     isActive: Boolean(row.is_active),
     allowNegativeStock: Boolean(row.allow_negative_stock),
+    outputArticleId,
+    outputArticleName: outArt?.name ? String(outArt.name) : null,
     listPrices,
   }
 }

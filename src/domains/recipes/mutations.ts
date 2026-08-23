@@ -73,6 +73,47 @@ function validateRecipeInput(
   return { ok: true }
 }
 
+const RECIPE_OUTPUT_KINDS = new Set(["merchandise", "raw_material"])
+
+async function resolveOutputArticle(
+  supabase: SupabaseClient,
+  popId: string,
+  outputArticleId: string | null | undefined,
+  ingredientIds: string[],
+): Promise<
+  { ok: true; articleId: string | null } | { ok: false; error: string }
+> {
+  const id = outputArticleId?.trim() ?? ""
+  if (!id) return { ok: true, articleId: null }
+  if (ingredientIds.includes(id)) {
+    return {
+      ok: false,
+      error:
+        "El artículo que produce no puede ser un ingrediente de la misma receta.",
+    }
+  }
+  const { data, error } = await supabase
+    .from("articles")
+    .select("id, item_kind, is_active")
+    .eq("id", id)
+    .eq("pop_id", popId)
+    .maybeSingle()
+  if (error || !data?.id) {
+    return { ok: false, error: "Artículo de producción no encontrado." }
+  }
+  if (data.is_active === false) {
+    return { ok: false, error: "El artículo de producción está inactivo." }
+  }
+  const kind = String(data.item_kind ?? "")
+  if (!RECIPE_OUTPUT_KINDS.has(kind)) {
+    return {
+      ok: false,
+      error: "El artículo que produce tiene que ser mercadería o materia prima.",
+    }
+  }
+  return { ok: true, articleId: String(data.id) }
+}
+
 async function loadIngredientArticles(
   supabase: SupabaseClient,
   popId: string,
@@ -251,6 +292,14 @@ export async function createRecipe(
   const loaded = await loadIngredientArticles(supabase, popId, input.ingredients)
   if (!loaded.ok) return { success: false, error: loaded.error, status: 400 }
 
+  const output = await resolveOutputArticle(
+    supabase,
+    popId,
+    input.outputArticleId,
+    input.ingredients.map((line) => line.articleId.trim()),
+  )
+  if (!output.ok) return { success: false, error: output.error, status: 400 }
+
   const costPrice = computeRecipeCostPrice(
     loaded.rows.map((r) => ({
       quantity: r.quantity,
@@ -274,6 +323,7 @@ export async function createRecipe(
       image_url: imageUrl ? imageUrl : null,
       is_active: input.isActive,
       allow_negative_stock: Boolean(input.allowNegativeStock),
+      output_article_id: output.articleId,
     })
     .select("id")
     .single()
@@ -345,6 +395,14 @@ export async function updateRecipe(
   const loaded = await loadIngredientArticles(supabase, popId, input.ingredients)
   if (!loaded.ok) return { success: false, error: loaded.error, status: 400 }
 
+  const output = await resolveOutputArticle(
+    supabase,
+    popId,
+    input.outputArticleId,
+    input.ingredients.map((line) => line.articleId.trim()),
+  )
+  if (!output.ok) return { success: false, error: output.error, status: 400 }
+
   const costPrice = computeRecipeCostPrice(
     loaded.rows.map((r) => ({
       quantity: r.quantity,
@@ -367,6 +425,7 @@ export async function updateRecipe(
       image_url: imageUrl ? imageUrl : null,
       is_active: input.isActive,
       allow_negative_stock: Boolean(input.allowNegativeStock),
+      output_article_id: output.articleId,
     })
     .eq("id", recipeId)
     .eq("pop_id", popId)

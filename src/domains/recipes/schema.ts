@@ -86,6 +86,10 @@ export const upsertRecipeBodySchema = z.object({
   iva: z.number(),
   isActive: z.boolean(),
   allowNegativeStock: z.boolean(),
+  outputArticleId: z
+    .union([z.string().uuid(), z.literal(""), z.null()])
+    .optional()
+    .transform((v) => (v && v.length > 0 ? v : null)),
   ingredients: z.array(ingredientInputSchema).min(1),
   listPrices: z.array(listPriceAmountSchema).optional(),
 })
@@ -138,6 +142,8 @@ export type RecipeRow = {
   ingredientCount: number
   isActive: boolean
   allowNegativeStock: boolean
+  outputArticleId: string | null
+  outputArticleName: string | null
   listPrices: RecipeListPriceRow[]
 }
 

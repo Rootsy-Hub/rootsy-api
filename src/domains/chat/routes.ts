@@ -3,12 +3,14 @@ import { z } from "zod"
 import type { SidecarEnv } from "../../sidecar/pop.js"
 import { hasAnyPermission, requireAnyPermission } from "../../sidecar/permissions.js"
 import { CHAT_CREATE, CHAT_DELETE, CHAT_READ, CHAT_UPDATE } from "./allowlist.js"
+import { uploadChatChannelImage } from "./image.js"
 import {
   createChatChannel,
   deleteChatChannel,
   getChatChannel,
   getChatWorkspace,
   listChatChannelMemberIds,
+  listChatMessages,
   markChatChannelRead,
   sendChatMessage,
   updateChatChannel,
@@ -16,6 +18,7 @@ import {
 import { chatMessagePayload, publishChatEvent } from "./realtime.js"
 import {
   createChannelBodySchema,
+  listMessagesQuerySchema,
   sendMessageBodySchema,
   updateChannelBodySchema,
 } from "./schema.js"
@@ -80,6 +83,25 @@ chatRoutes.post("/", requireAnyPermission([...CHAT_READ, ...CHAT_CREATE]), async
   return c.json(result, 201)
 })
 
+chatRoutes.post(
+  "/image",
+  requireAnyPermission([...CHAT_READ, ...CHAT_CREATE, ...CHAT_UPDATE]),
+  async (c) => {
+    const body = await c.req.parseBody()
+    const file = body.file
+    if (!(file instanceof File)) {
+      return c.json({ success: false, error: "Elegí una imagen para subir." }, 400)
+    }
+    const result = await uploadChatChannelImage(
+      c.get("supabase"),
+      c.get("sidecar").popId,
+      file,
+    )
+    if (!result.success) return c.json(result, result.status)
+    return c.json(result, 201)
+  },
+)
+
 chatRoutes.get(
   "/:channelId/messages",
   requireAnyPermission(CHAT_READ),
@@ -88,11 +110,21 @@ chatRoutes.get(
     if (!id.success) {
       return c.json({ success: false, error: "channelId inválido" }, 400)
     }
-    const result = await getChatChannel(
+    const rawLimit = c.req.query("limit")
+    const query = listMessagesQuerySchema.safeParse({
+      ...(rawLimit ? { limit: rawLimit } : {}),
+      before: c.req.query("before") || undefined,
+      beforeId: c.req.query("beforeId") || undefined,
+    })
+    if (!query.success) {
+      return c.json({ success: false, error: "Query inválida" }, 400)
+    }
+    const result = await listChatMessages(
       c.get("supabase"),
       c.get("sidecar").popId,
       c.get("userId"),
       id.data,
+      query.data,
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)

@@ -39,3 +39,13 @@ export function computeRecipeCostPrice(
     ingredients.reduce((sum, line) => sum + ingredientLineCost(line), 0),
   )
 }
+
+export function consumptionQuantity(
+  quantity: number,
+  wastePct: number | null | undefined,
+  articleDefaultWastePct: number | null | undefined,
+  unitsProduced: number,
+): number {
+  const waste = effectiveWastePct(wastePct, articleDefaultWastePct)
+  return quantity * unitsProduced * (1 + waste / 100)
+}
