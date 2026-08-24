@@ -123,6 +123,111 @@ async function namesByUserId(
   return map
 }
 
+const RESOURCE_NAME_LOOKUP: Record<string, { table: string; column: string }> = {
+  articles: { table: "articles", column: "name" },
+  categories: { table: "categories", column: "name" },
+  checks: { table: "checks", column: "check_number" },
+  clients: { table: "clients", column: "name" },
+  expenses: { table: "expenses", column: "description" },
+  "expense-categories": { table: "expense_categories", column: "name" },
+  printers: { table: "pop_printers", column: "name" },
+  "price-lists": { table: "price_lists", column: "name" },
+  promotions: { table: "promotions", column: "name" },
+  recipes: { table: "recipes", column: "name" },
+  "recipe-categories": { table: "recipe_categories", column: "name" },
+  services: { table: "service_types", column: "name" },
+  "service-categories": { table: "service_categories", column: "name" },
+  suppliers: { table: "suppliers", column: "name" },
+}
+
+function recordKey(resource: string, id: string): string {
+  return `${resource}:${id}`
+}
+
+async function recordLabelsById(
+  supabase: SupabaseClient,
+  popId: string,
+  rows: AuditEventRow[],
+): Promise<Map<string, string>> {
+  const map = new Map<string, string>()
+  const idsByResource = new Map<string, string[]>()
+  const employeeIds: string[] = []
+  const inviteIds: string[] = []
+
+  for (const row of rows) {
+    if (!row.resource_id) continue
+    if (row.resource === "hr") {
+      if (row.kind?.startsWith("hr.employee.")) employeeIds.push(row.resource_id)
+      else if (row.kind?.startsWith("hr.invitation.")) inviteIds.push(row.resource_id)
+      continue
+    }
+    if (!RESOURCE_NAME_LOOKUP[row.resource]) continue
+    const list = idsByResource.get(row.resource) ?? []
+    list.push(row.resource_id)
+    idsByResource.set(row.resource, list)
+  }
+
+  const jobs: Promise<void>[] = []
+
+  for (const [resource, ids] of idsByResource) {
+    const spec = RESOURCE_NAME_LOOKUP[resource]
+    const unique = [...new Set(ids)]
+    jobs.push(
+      (async () => {
+        const { data, error } = await supabase
+          .from(spec.table)
+          .select(`id, ${spec.column}`)
+          .eq("pop_id", popId)
+          .in("id", unique)
+        if (error) return
+        for (const row of (data as unknown as Record<string, unknown>[] | null) ?? []) {
+          const label = String(row[spec.column] ?? "").trim()
+          if (label) map.set(recordKey(resource, String(row.id)), label)
+        }
+      })(),
+    )
+  }
+
+  const uniqueEmployees = [...new Set(employeeIds)]
+  if (uniqueEmployees.length > 0) {
+    jobs.push(
+      (async () => {
+        const { data, error } = await supabase
+          .from("pop_employees")
+          .select("id, first_name, last_name")
+          .eq("pop_id", popId)
+          .in("id", uniqueEmployees)
+        if (error) return
+        for (const row of data ?? []) {
+          const name = personName(row)
+          if (name) map.set(recordKey("hr", String(row.id)), name)
+        }
+      })(),
+    )
+  }
+
+  const uniqueInvites = [...new Set(inviteIds)]
+  if (uniqueInvites.length > 0) {
+    jobs.push(
+      (async () => {
+        const { data, error } = await supabase
+          .from("pop_invitations")
+          .select("id, email")
+          .eq("pop_id", popId)
+          .in("id", uniqueInvites)
+        if (error) return
+        for (const row of data ?? []) {
+          const email = String(row.email ?? "").trim()
+          if (email) map.set(recordKey("hr", String(row.id)), email)
+        }
+      })(),
+    )
+  }
+
+  await Promise.all(jobs)
+  return map
+}
+
 export const auditRoutes = new Hono<SidecarEnv>()
 
 auditRoutes.get("/", requireAnyPermission(AUDIT_READ), async (c) => {
@@ -200,13 +305,13 @@ auditRoutes.get("/", requireAnyPermission(AUDIT_READ), async (c) => {
   }
 
   const rows = (data ?? []) as AuditEventRow[]
-  const names = await namesByUserId(
-    supabase,
-    popId,
-    rows.flatMap((row) =>
-      [row.requester_user_id, row.approver_user_id].filter((id): id is string => Boolean(id)),
-    ),
+  const actorIds = rows.flatMap((row) =>
+    [row.requester_user_id, row.approver_user_id].filter((id): id is string => Boolean(id)),
   )
+  const [names, recordLabels] = await Promise.all([
+    namesByUserId(supabase, popId, actorIds),
+    recordLabelsById(supabase, popId, rows),
+  ])
 
   const events = rows.map((row) => ({
     ...row,
@@ -218,6 +323,10 @@ auditRoutes.get("/", requireAnyPermission(AUDIT_READ), async (c) => {
     approver_name: row.approver_user_id
       ? names.get(row.approver_user_id) ?? null
       : null,
+    record_label:
+      row.resource_id
+        ? recordLabels.get(recordKey(row.resource, row.resource_id)) ?? null
+        : null,
   }))
 
   return c.json({
