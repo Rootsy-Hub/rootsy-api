@@ -11,6 +11,7 @@ compatibility_flags = ["nodejs_compat"]
 #   wrangler secret put SUPABASE_ANON_KEY
 #   wrangler secret put SUPABASE_JWT_SECRET
 #   wrangler secret put ROOTSY_API_SECRET
+#   wrangler secret put ROOTSY_AI_EXECUTION_SECRET
 
 [[durable_objects.bindings]]
 name = "POP_REALTIME"

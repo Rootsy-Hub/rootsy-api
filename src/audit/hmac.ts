@@ -12,7 +12,7 @@ export function verifyRootsyAiExecution(input: {
 }): boolean {
   return verifyRootsyAiExecutionHeader({
     header: input.header,
-    secret: getEnv().ROOTSY_AI_EXECUTION_SECRET,
+    secret: getEnv().ROOTSY_AI_EXECUTION_SECRET ?? "",
     userId: input.userId,
     popId: input.popId,
     method: input.method,

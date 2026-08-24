@@ -28,7 +28,7 @@ export function verifyRootsyAiExecutionHeader(input: {
   maxAgeMs?: number
 }): boolean {
   const raw = input.header?.trim()
-  if (!raw) return false
+  if (!input.secret?.trim() || !raw) return false
   const match = /^v1=(\d+)\.([A-Za-z0-9]+)\.([a-f0-9]+)$/.exec(raw)
   if (!match) return false
   const timestamp = Number(match[1])

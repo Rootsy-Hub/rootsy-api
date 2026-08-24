@@ -6,8 +6,12 @@ const envSchema = z.object({
   SUPABASE_JWT_SECRET: z.string().optional(),
   SUPABASE_JWKS_URL: z.string().url().optional(),
   ROOTSY_API_SECRET: z.string().min(16),
-  /** HMAC del runner de Rootsy IA. Distinto de ROOTSY_API_SECRET. */
-  ROOTSY_AI_EXECUTION_SECRET: z.string().min(16),
+  /** HMAC del runner de Rootsy IA. Distinto de ROOTSY_API_SECRET. No bloquea lecturas. */
+  ROOTSY_AI_EXECUTION_SECRET: z.preprocess(
+    (value) =>
+      typeof value === "string" && value.trim() === "" ? undefined : value,
+    z.string().min(16).optional(),
+  ),
   PORT: z.coerce.number().int().positive().default(8787),
   /** Tope de cada hop a Supabase (PostgREST / Auth). */
   SUPABASE_TIMEOUT_MS: z.coerce.number().int().positive().default(8000),
