@@ -32,6 +32,7 @@ describe("audit helpers", () => {
     assert.equal(redacted.name, "Ana")
     assert.equal("clock_pin" in redacted, false)
     assert.equal("code_hash" in redacted, false)
+    assert.equal("token" in redactAuditJson({ email: "a@b.c", token: "secret" }) as object, false)
   })
 
   it("verifica HMAC de Rootsy IA", () => {

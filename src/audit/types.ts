@@ -25,6 +25,7 @@ const SECRET_KEYS = new Set([
   "pin",
   "password",
   "secret",
+  "token",
 ])
 
 export function redactAuditJson(value: unknown): unknown {

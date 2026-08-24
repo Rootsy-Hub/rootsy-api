@@ -1,9 +1,89 @@
+import type { SupabaseClient } from "@supabase/supabase-js"
 import { Hono } from "hono"
 import { z } from "zod"
+import { redactAuditJson } from "../../audit/types.js"
 import type { SidecarEnv } from "../../sidecar/pop.js"
 import { requireAnyPermission } from "../../sidecar/permissions.js"
 
 const AUDIT_READ = ["audit:read"] as const
+
+type AuditEventRow = {
+  id: string
+  occurred_at: string
+  expires_at: string
+  resource: string
+  resource_id: string | null
+  action: string
+  http_method: string
+  path: string
+  previous_state: unknown
+  new_state: unknown
+  requester_user_id: string | null
+  approver_user_id: string | null
+  execution_source: string
+  kind: string | null
+}
+
+function escapeIlikeToken(raw: string): string {
+  return raw.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_")
+}
+
+function csvAllowlist(
+  raw: string | undefined,
+  allow: readonly string[],
+): string[] {
+  if (!raw?.trim()) return []
+  const allowSet = new Set(allow)
+  return [
+    ...new Set(
+      raw
+        .split(",")
+        .map((item) => item.trim())
+        .filter((item) => allowSet.has(item)),
+    ),
+  ]
+}
+
+function buildAuditSearchOr(raw: string | undefined): string | null {
+  const t = raw?.trim().replace(/,/g, " ").trim()
+  if (!t) return null
+  const pattern = `%${escapeIlikeToken(t)}%`
+  return [
+    `resource.ilike.${pattern}`,
+    `path.ilike.${pattern}`,
+    `kind.ilike.${pattern}`,
+    `new_state->>name.ilike.${pattern}`,
+    `previous_state->>name.ilike.${pattern}`,
+    `new_state->>description.ilike.${pattern}`,
+    `previous_state->>description.ilike.${pattern}`,
+    `new_state->>first_name.ilike.${pattern}`,
+    `previous_state->>first_name.ilike.${pattern}`,
+    `new_state->>email.ilike.${pattern}`,
+    `previous_state->>email.ilike.${pattern}`,
+  ].join(",")
+}
+
+function personName(row: { first_name?: string | null; last_name?: string | null }): string {
+  return `${row.first_name ?? ""} ${row.last_name ?? ""}`.trim()
+}
+
+async function namesByUserId(
+  supabase: SupabaseClient,
+  ids: string[],
+): Promise<Map<string, string>> {
+  const unique = [...new Set(ids.filter(Boolean))]
+  const map = new Map<string, string>()
+  if (unique.length === 0) return map
+  const { data } = await supabase
+    .from("users")
+    .select("id, first_name, last_name")
+    .in("id", unique)
+  for (const row of data ?? []) {
+    const name = personName(row)
+    if (name) map.set(String(row.id), name)
+  }
+  return map
+}
 
 export const auditRoutes = new Hono<SidecarEnv>()
 
@@ -13,11 +93,21 @@ auditRoutes.get("/", requireAnyPermission(AUDIT_READ), async (c) => {
       page: z.coerce.number().int().positive().optional(),
       pageSize: z.coerce.number().int().positive().max(50).optional(),
       resource: z.string().optional(),
+      q: z.string().max(80).optional(),
+      from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+      to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+      action: z.string().optional(),
+      source: z.string().optional(),
     })
     .safeParse({
       page: c.req.query("page") || undefined,
       pageSize: c.req.query("pageSize") || undefined,
       resource: c.req.query("resource") || undefined,
+      q: c.req.query("q") || undefined,
+      from: c.req.query("from") || undefined,
+      to: c.req.query("to") || undefined,
+      action: c.req.query("action") || undefined,
+      source: c.req.query("source") || undefined,
     })
   if (!parsed.success) {
     return c.json({ success: false, error: "Parámetros inválidos" }, 400)
@@ -28,9 +118,15 @@ auditRoutes.get("/", requireAnyPermission(AUDIT_READ), async (c) => {
   const from = (page - 1) * pageSize
   const to = from + pageSize - 1
   const popId = c.get("sidecar").popId
+  const supabase = c.get("supabase")
 
-  let query = c
-    .get("supabase")
+  const ACTIONS = ["create", "update", "delete"] as const
+  const SOURCES = ["user", "rootsy_ai", "system"] as const
+
+  const actions = csvAllowlist(parsed.data.action, ACTIONS)
+  const sources = csvAllowlist(parsed.data.source, SOURCES)
+
+  let query = supabase
     .from("audit_events")
     .select(
       "id, occurred_at, expires_at, resource, resource_id, action, http_method, path, previous_state, new_state, requester_user_id, approver_user_id, execution_source, kind",
@@ -44,15 +140,51 @@ auditRoutes.get("/", requireAnyPermission(AUDIT_READ), async (c) => {
   const resource = parsed.data.resource?.trim()
   if (resource) query = query.eq("resource", resource)
 
+  if (parsed.data.from) {
+    query = query.gte("occurred_at", `${parsed.data.from}T00:00:00.000`)
+  }
+  if (parsed.data.to) {
+    query = query.lte("occurred_at", `${parsed.data.to}T23:59:59.999`)
+  }
+  if (actions.length > 0 && actions.length < ACTIONS.length) {
+    query = query.in("action", actions)
+  }
+  if (sources.length > 0 && sources.length < SOURCES.length) {
+    query = query.in("execution_source", sources)
+  }
+
+  const searchOr = buildAuditSearchOr(parsed.data.q)
+  if (searchOr) query = query.or(searchOr)
+
   const { data, error, count } = await query
   if (error) {
     return c.json({ success: false, error: error.message }, 500)
   }
 
+  const rows = (data ?? []) as AuditEventRow[]
+  const names = await namesByUserId(
+    supabase,
+    rows.flatMap((row) =>
+      [row.requester_user_id, row.approver_user_id].filter((id): id is string => Boolean(id)),
+    ),
+  )
+
+  const events = rows.map((row) => ({
+    ...row,
+    previous_state: redactAuditJson(row.previous_state),
+    new_state: redactAuditJson(row.new_state),
+    requester_name: row.requester_user_id
+      ? names.get(row.requester_user_id) ?? null
+      : null,
+    approver_name: row.approver_user_id
+      ? names.get(row.approver_user_id) ?? null
+      : null,
+  }))
+
   return c.json({
     success: true,
     data: {
-      events: data ?? [],
+      events,
       page,
       pageSize,
       total: count ?? 0,
