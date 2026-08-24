@@ -39,6 +39,7 @@ export function chatMessagePayload(
       id: message.id,
       authorUserId: message.authorUserId,
       authorName: message.authorName,
+      authorImageUrl: message.authorImageUrl,
       body: message.body,
       createdAt: message.createdAt,
     },

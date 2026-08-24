@@ -96,15 +96,50 @@ type MessageDb = {
   created_at: string
 }
 
-function mapMessage(row: MessageDb, userId: string): ChatMessageRow {
+function mapMessage(
+  row: MessageDb,
+  userId: string,
+  imageUrl: string | null = null,
+): ChatMessageRow {
   return {
     id: String(row.id),
     authorUserId: String(row.author_user_id),
     authorName: String(row.author_name ?? ""),
+    authorImageUrl: imageUrl,
     body: String(row.body ?? ""),
     createdAt: String(row.created_at),
     mine: sameUserId(String(row.author_user_id), userId),
   }
+}
+
+async function loadUserImageUrls(
+  supabase: SupabaseClient,
+  userIds: string[],
+): Promise<Record<string, string | null>> {
+  const ids = uniqueIds(userIds)
+  if (ids.length === 0) return {}
+  const { data } = await supabase
+    .from("users")
+    .select("id, image_url")
+    .in("id", ids)
+  const map: Record<string, string | null> = {}
+  for (const row of data || []) {
+    const id = String(row.id)
+    const url =
+      row.image_url != null && String(row.image_url).trim()
+        ? String(row.image_url)
+        : null
+    map[id] = url
+    map[id.replace(/-/g, "").toLowerCase()] = url
+  }
+  return map
+}
+
+function imageUrlOf(
+  map: Record<string, string | null>,
+  userId: string,
+): string | null {
+  return map[userId] ?? map[userId.replace(/-/g, "").toLowerCase()] ?? null
 }
 
 function isOlderThanCursor(row: MessageDb, cursor: ChatMessageCursor): boolean {
@@ -169,10 +204,16 @@ async function loadEligiblePeople(
     pop?.owner_user_id != null ? String(pop.owner_user_id) : null
   if (ownerId && !userIds.includes(ownerId)) userIds.push(ownerId)
 
-  const profileMap: Record<string, { first_name: string; last_name: string }> = {}
+  const profileMap: Record<
+    string,
+    { first_name: string; last_name: string; image_url: string | null }
+  > = {}
   if (userIds.length > 0) {
     const [{ data: profiles }, { data: employeeRows }] = await Promise.all([
-      supabase.from("users").select("id, first_name, last_name").in("id", userIds),
+      supabase
+        .from("users")
+        .select("id, first_name, last_name, image_url")
+        .in("id", userIds),
       supabase
         .from("pop_employees")
         .select("user_id, first_name, last_name, left_at")
@@ -183,6 +224,7 @@ async function loadEligiblePeople(
       profileMap[String(profile.id)] = {
         first_name: profile.first_name ?? "",
         last_name: profile.last_name ?? "",
+        image_url: profile.image_url ?? null,
       }
     }
     for (const employee of employeeRows || []) {
@@ -200,7 +242,10 @@ async function loadEligiblePeople(
       if (current && (current.first_name.trim() || current.last_name.trim()) && employee.left_at) {
         continue
       }
-      profileMap[id] = employeeName
+      profileMap[id] = {
+        ...employeeName,
+        image_url: current?.image_url ?? null,
+      }
     }
   }
 
@@ -209,6 +254,7 @@ async function loadEligiblePeople(
     const prof = profileMap[String(row.user_id)] || {
       first_name: "",
       last_name: "",
+      image_url: null,
     }
     return {
       userId: String(row.user_id),
@@ -216,17 +262,23 @@ async function loadEligiblePeople(
       lastName: prof.last_name,
       roleId: String(row.role_id ?? ""),
       roleDisplayName: rel?.display_name ?? "—",
+      imageUrl: prof.image_url,
     }
   })
 
   if (ownerId && !members.some((member) => sameUserId(member.userId, ownerId))) {
-    const prof = profileMap[ownerId] || { first_name: "", last_name: "" }
+    const prof = profileMap[ownerId] || {
+      first_name: "",
+      last_name: "",
+      image_url: null,
+    }
     members.unshift({
       userId: ownerId,
       firstName: prof.first_name,
       lastName: prof.last_name,
       roleId: "",
       roleDisplayName: "Propietario",
+      imageUrl: prof.image_url,
     })
   }
 
@@ -538,7 +590,14 @@ export async function listChatMessages(
   )
   const hasMore = rows.length > limit
   const page = rows.slice(0, limit)
-  const messages = [...page].reverse().map((row) => mapMessage(row, userId))
+  const pageMessages = [...page].reverse()
+  const imageMap = await loadUserImageUrls(
+    supabase,
+    pageMessages.map((row) => String(row.author_user_id)),
+  )
+  const messages = pageMessages.map((row) =>
+    mapMessage(row, userId, imageUrlOf(imageMap, String(row.author_user_id))),
+  )
   const oldest = messages[0] ?? null
 
   return {
@@ -767,12 +826,14 @@ export async function sendChatMessage(
     last_read_at: new Date().toISOString(),
   })
 
+  const imageMap = await loadUserImageUrls(supabase, [userId])
   return {
     success: true,
     data: {
       id: String(data.id),
       authorUserId: String(data.author_user_id),
       authorName: String(data.author_name),
+      authorImageUrl: imageUrlOf(imageMap, userId),
       body: String(data.body),
       createdAt: String(data.created_at),
       mine: true,

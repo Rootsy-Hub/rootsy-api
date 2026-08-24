@@ -40,6 +40,7 @@ export type ChatEligibleUser = {
   lastName: string
   roleId: string
   roleDisplayName: string
+  imageUrl: string | null
 }
 
 export type ChatRoleOption = {
@@ -65,6 +66,7 @@ export type ChatMessageRow = {
   id: string
   authorUserId: string
   authorName: string
+  authorImageUrl: string | null
   body: string
   createdAt: string
   mine: boolean
