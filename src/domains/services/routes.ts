@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import { z } from "zod"
 import type { SidecarEnv } from "../../sidecar/pop.js"
 import { requireAnyPermission } from "../../sidecar/permissions.js"
+import { requireMutationPermission } from "../../sidecar/mutationPermission.js"
 import {
   SERVICE_CREATE,
   SERVICE_DELETE,
@@ -11,6 +12,7 @@ import {
 import { uploadServiceImage } from "./image.js"
 import { createService, deleteService, updateService } from "./mutations.js"
 import { getService, listServices, searchServiceArticles } from "./queries.js"
+import { parsePatchBody } from "../../lib/patchBody.js"
 import {
   deleteServiceBodySchema,
   listServiceArticlesQuerySchema,
@@ -57,7 +59,7 @@ serviceRoutes.get("/", requireAnyPermission(SERVICE_READ), async (c) => {
   return c.json(result)
 })
 
-serviceRoutes.post("/", requireAnyPermission(SERVICE_CREATE), async (c) => {
+serviceRoutes.post("/", requireMutationPermission(SERVICE_CREATE), async (c) => {
   const body = upsertServiceBodySchema.safeParse(
     await c.req.json().catch(() => null),
   )
@@ -74,6 +76,7 @@ serviceRoutes.post("/", requireAnyPermission(SERVICE_CREATE), async (c) => {
     c.get("supabase"),
     c.get("sidecar").popId,
     body.data,
+    c.get("mutationAudit"),
   )
   if (!result.success) return c.json(result, result.status)
   return c.json(result, 201)
@@ -144,29 +147,25 @@ serviceRoutes.get("/:serviceId", requireAnyPermission(SERVICE_READ), async (c) =
 
 serviceRoutes.patch(
   "/:serviceId",
-  requireAnyPermission(SERVICE_UPDATE),
+  requireMutationPermission(SERVICE_UPDATE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("serviceId"))
     if (!id.success) {
       return c.json({ success: false, error: "serviceId inválido" }, 400)
     }
-    const body = upsertServiceBodySchema.safeParse(
+    const body = parsePatchBody(
+      upsertServiceBodySchema,
       await c.req.json().catch(() => null),
     )
     if (!body.success) {
-      return c.json(
-        {
-          success: false,
-          error: body.error.issues[0]?.message ?? "Body inválido",
-        },
-        400,
-      )
+      return c.json({ success: false, error: body.error }, 400)
     }
     const result = await updateService(
       c.get("supabase"),
       c.get("sidecar").popId,
       id.data,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -175,7 +174,7 @@ serviceRoutes.patch(
 
 serviceRoutes.delete(
   "/:serviceId",
-  requireAnyPermission(SERVICE_DELETE),
+  requireMutationPermission(SERVICE_DELETE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("serviceId"))
     if (!id.success) {
@@ -198,6 +197,7 @@ serviceRoutes.delete(
       c.get("sidecar").popId,
       id.data,
       body.data.confirmationTyped,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)

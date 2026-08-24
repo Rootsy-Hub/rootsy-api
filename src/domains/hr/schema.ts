@@ -61,14 +61,17 @@ export const memberRoleBodySchema = z.object({
 
 export const roleGrantsBodySchema = z.object({
   grantKeys: z.array(z.string()),
+  canApprove: z.boolean().default(false),
 })
 
 export const createRoleBodySchema = z.object({
   displayName: z.string(),
   grantKeys: z.array(z.string()),
+  canApprove: z.boolean().default(false),
 })
 
 export type UpsertEmployeeBody = z.infer<typeof upsertEmployeeBodySchema>
+export type PatchEmployeeBody = Partial<Omit<UpsertEmployeeBody, "id">>
 
 export type EmployeeRow = {
   id: string

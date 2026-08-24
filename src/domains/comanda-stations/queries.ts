@@ -1,4 +1,11 @@
+import { randomUUID } from "node:crypto"
 import type { SupabaseClient } from "@supabase/supabase-js"
+import {
+  auditedDelete,
+  auditedInsert,
+  auditedUpdate,
+} from "../../audit/simpleWrite.js"
+import type { MutationAuditCtx } from "../../audit/types.js"
 import type { ComandaStationDetail, ComandaStationRow } from "./schema.js"
 
 const SELECT = "id, name, sort_order, is_active"
@@ -20,7 +27,7 @@ function mapRow(row: StationDbRow): ComandaStationRow {
 }
 
 function stationUniqueNameError(message: string): string {
-  if (/comanda_stations_pop_name_unique/i.test(message)) {
+  if (/comanda_stations_pop_name_unique|duplicate key/i.test(message)) {
     return "Ya existe una estación con ese nombre."
   }
   return message
@@ -118,29 +125,34 @@ export async function createComandaStation(
   supabase: SupabaseClient,
   popId: string,
   name: string,
+  audit: MutationAuditCtx,
 ): Promise<
   | { success: true; data: ComandaStationRow }
   | { success: false; error: string; status?: 400 }
 > {
   const sortOrder = await nextSortOrder(supabase, popId)
-  const { data, error } = await supabase
-    .from("comanda_stations")
-    .insert({
-      pop_id: popId,
-      name,
-      sort_order: sortOrder,
-      is_active: true,
-    })
-    .select(SELECT)
-    .single()
-  if (error || !data) {
+  const id = randomUUID()
+  const row: StationDbRow = {
+    id,
+    name,
+    sort_order: sortOrder,
+    is_active: true,
+  }
+  const applied = await auditedInsert(supabase, {
+    kind: "comanda-stations.create",
+    table: "comanda_stations",
+    row: { ...row, pop_id: popId },
+    ctx: audit,
+    popId,
+  })
+  if (!applied.success) {
     return {
       success: false,
-      error: stationUniqueNameError(error?.message || "No se pudo crear la estación."),
+      error: stationUniqueNameError(applied.error || "No se pudo crear la estación."),
       status: 400,
     }
   }
-  return { success: true, data: mapRow(data as StationDbRow) }
+  return { success: true, data: mapRow(row) }
 }
 
 export async function updateComandaStation(
@@ -148,34 +160,52 @@ export async function updateComandaStation(
   popId: string,
   stationId: string,
   name: string,
+  audit: MutationAuditCtx,
 ): Promise<
   | { success: true; data: ComandaStationRow }
   | { success: false; error: string; status: 400 | 404 | 500 }
 > {
-  const { data, error } = await supabase
+  const { data: current, error: fetchError } = await supabase
     .from("comanda_stations")
-    .update({ name })
+    .select(SELECT)
     .eq("id", stationId)
     .eq("pop_id", popId)
-    .select(SELECT)
     .maybeSingle()
-  if (error) {
-    return {
-      success: false,
-      error: stationUniqueNameError(error.message),
-      status: 400,
-    }
+  if (fetchError) {
+    return { success: false, error: fetchError.message, status: 500 }
   }
-  if (!data) {
+  if (!current) {
     return { success: false, error: "Estación no encontrada.", status: 404 }
   }
-  return { success: true, data: mapRow(data as StationDbRow) }
+  const next = { ...current, name }
+  const applied = await auditedUpdate(supabase, {
+    kind: "comanda-stations.patch",
+    table: "comanda_stations",
+    id: stationId,
+    row: { name },
+    ctx: audit,
+    popId,
+    previous: current,
+    next,
+  })
+  if (!applied.success) {
+    const unique = /comanda_stations_pop_name_unique|duplicate key/i.test(
+      applied.error,
+    )
+    return {
+      success: false,
+      error: stationUniqueNameError(applied.error),
+      status: unique ? 400 : applied.status === 404 ? 404 : 500,
+    }
+  }
+  return { success: true, data: mapRow(next as StationDbRow) }
 }
 
 export async function deleteComandaStation(
   supabase: SupabaseClient,
   popId: string,
   stationId: string,
+  audit: MutationAuditCtx,
 ): Promise<
   { success: true } | { success: false; error: string; status: 404 | 409 | 500 }
 > {
@@ -189,11 +219,20 @@ export async function deleteComandaStation(
     }
   }
 
-  const { error } = await supabase
-    .from("comanda_stations")
-    .delete()
-    .eq("id", stationId)
-    .eq("pop_id", popId)
-  if (error) return { success: false, error: error.message, status: 500 }
+  const applied = await auditedDelete(supabase, {
+    kind: "comanda-stations.delete",
+    table: "comanda_stations",
+    id: stationId,
+    ctx: audit,
+    popId,
+    previous: existing.data,
+  })
+  if (!applied.success) {
+    return {
+      success: false,
+      error: applied.error,
+      status: applied.status === 404 ? 404 : 500,
+    }
+  }
   return { success: true }
 }

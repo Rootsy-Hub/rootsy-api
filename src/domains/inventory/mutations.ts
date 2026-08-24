@@ -1,4 +1,12 @@
+import { randomUUID } from "node:crypto"
 import type { SupabaseClient } from "@supabase/supabase-js"
+import { applyWithAudit } from "../../audit/apply.js"
+import {
+  nextAccountingEntryNumber,
+  postedAccountingEntryOps,
+} from "../../audit/ledgerOps.js"
+import { auditedDelete } from "../../audit/simpleWrite.js"
+import type { AuditOp, MutationAuditCtx } from "../../audit/types.js"
 import { resolveArticleReferenceUnitCostsByArticleId } from "../recipes/articleReferenceCost.js"
 import {
   CHART_GASTO_MERMA_CODES,
@@ -22,7 +30,7 @@ type MutateResult =
 
 type ApplyResult =
   | { success: true; data: { applied: number } }
-  | { success: false; error: string; status: 400 | 403 | 500 }
+  | { success: false; error: string; status: 400 | 403 | 404 | 500 }
 
 function articleReferenceCostError(articleName: string): string {
   const label = articleName.trim() || "el artículo"
@@ -72,6 +80,7 @@ export async function createInventoryAdjustment(
   popSiteId: string,
   userId: string,
   input: CreateAdjustmentBody,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const deltaRaw = Number(input.quantityDelta)
   if (!Number.isFinite(deltaRaw) || deltaRaw === 0) {
@@ -257,143 +266,67 @@ export async function createInventoryAdjustment(
   }
 
   const entryDescription = `Ajuste inventario — ${articleName || "Artículo"}`
-
-  async function undoFifoAfterMovementFailure(mid: string) {
-    if (isIncrease && valuationUnitForLayer != null) {
-      await supabase.from("inventory_cost_layers").delete().eq("source_movement_id", mid)
-    }
-    if (!isIncrease && fifoAllocations.length > 0) {
-      for (const r of fifoAllocations) {
-        await supabase
-          .from("inventory_cost_layers")
-          .update({ quantity_remaining: r.remainingBefore })
-          .eq("id", r.layerId)
-      }
-    }
-    await supabase.from("inventory_movements").delete().eq("id", mid)
-  }
-
-  const { data: movIns, error: movErr } = await supabase
-    .from("inventory_movements")
-    .insert({
-      pop_id: popId,
-      location_id: location.locationId,
-      article_id: input.articleId,
-      quantity_delta: delta,
-      movement_type: "adjustment",
-      note,
-      created_by: userId,
-    })
-    .select("id")
-    .single()
-  if (movErr || !movIns?.id) {
-    return {
-      success: false,
-      error: movErr?.message || "No se pudo guardar el movimiento.",
-      status: 500,
-    }
-  }
-  const movementId = String(movIns.id)
+  const movementId = randomUUID()
+  const ops: AuditOp[] = [
+    {
+      op: "insert",
+      table: "inventory_movements",
+      row: {
+        id: movementId,
+        pop_id: popId,
+        location_id: location.locationId,
+        article_id: input.articleId,
+        quantity_delta: delta,
+        movement_type: "adjustment",
+        note,
+        created_by: userId,
+      },
+    },
+  ]
 
   if (isIncrease && valuationUnitForLayer != null) {
-    const { error: posLayerErr } = await supabase.from("inventory_cost_layers").insert({
-      pop_id: popId,
-      location_id: location.locationId,
-      article_id: input.articleId,
-      source_movement_id: movementId,
-      quantity_received: delta,
-      quantity_remaining: delta,
-      unit_cost: valuationUnitForLayer,
-      expires_at: inboundExpiresAt,
+    ops.push({
+      op: "insert",
+      table: "inventory_cost_layers",
+      row: {
+        id: randomUUID(),
+        pop_id: popId,
+        location_id: location.locationId,
+        article_id: input.articleId,
+        source_movement_id: movementId,
+        quantity_received: delta,
+        quantity_remaining: delta,
+        unit_cost: valuationUnitForLayer,
+        expires_at: inboundExpiresAt,
+      },
     })
-    if (posLayerErr) {
-      await supabase.from("inventory_movements").delete().eq("id", movementId)
-      return {
-        success: false,
-        error: posLayerErr.message || "No se pudo registrar la capa de costo del ajuste.",
-        status: 500,
-      }
-    }
   } else if (!isIncrease && fifoAllocations.length > 0) {
     for (const a of fifoAllocations) {
-      const { error: allocInsErr } = await supabase
-        .from("inventory_layer_allocations")
-        .insert({
+      ops.push({
+        op: "insert",
+        table: "inventory_layer_allocations",
+        row: {
+          id: randomUUID(),
           pop_id: popId,
           layer_id: a.layerId,
           article_id: input.articleId,
           inventory_movement_id: movementId,
           quantity: a.qty,
           unit_cost: a.unitCost,
-        })
-      if (allocInsErr) {
-        await supabase.from("inventory_movements").delete().eq("id", movementId)
-        return {
-          success: false,
-          error: allocInsErr.message || "No se pudo registrar la imputación FIFO.",
-          status: 500,
-        }
-      }
+        },
+      })
     }
     for (const a of fifoAllocations) {
-      const newRem = parseQty(a.remainingBefore - a.qty)
-      const { error: layUpdErr } = await supabase
-        .from("inventory_cost_layers")
-        .update({ quantity_remaining: newRem })
-        .eq("id", a.layerId)
-      if (layUpdErr) {
-        for (const r of fifoAllocations) {
-          await supabase
-            .from("inventory_cost_layers")
-            .update({ quantity_remaining: r.remainingBefore })
-            .eq("id", r.layerId)
-        }
-        await supabase.from("inventory_movements").delete().eq("id", movementId)
-        return {
-          success: false,
-          error: layUpdErr.message || "No se pudo actualizar la capa de costo.",
-          status: 500,
-        }
-      }
+      ops.push({
+        op: "update",
+        table: "inventory_cost_layers",
+        id: a.layerId,
+        row: { quantity_remaining: parseQty(a.remainingBefore - a.qty) },
+      })
     }
   }
 
-  const { data: maxRow } = await supabase
-    .from("accounting_entries")
-    .select("entry_number")
-    .eq("pop_id", popId)
-    .order("entry_number", { ascending: false })
-    .limit(1)
-    .maybeSingle()
-  const nextNum =
-    maxRow?.entry_number != null && Number.isFinite(Number(maxRow.entry_number))
-      ? Number(maxRow.entry_number) + 1
-      : 1
-
-  const { data: entIns, error: entErr } = await supabase
-    .from("accounting_entries")
-    .insert({
-      pop_id: popId,
-      entry_number: nextNum,
-      entry_date: entryDate,
-      source_type: "inventory_adjustment",
-      source_id: movementId,
-      description: entryDescription,
-      status: "draft",
-      created_by: userId,
-    })
-    .select("id")
-    .single()
-  if (entErr || !entIns?.id) {
-    await undoFifoAfterMovementFailure(movementId)
-    return {
-      success: false,
-      error: entErr?.message || "No se pudo crear el asiento.",
-      status: 500,
-    }
-  }
-  const entryId = String(entIns.id)
-
+  const nextNum = await nextAccountingEntryNumber(supabase, popId)
   const lineMercaderias = isIncrease
     ? {
         account_id: mercaderiasId,
@@ -424,38 +357,30 @@ export async function createInventoryAdjustment(
         description: note,
         line_order: 1,
       }
+  const ledger = postedAccountingEntryOps({
+    popId,
+    userId,
+    entryNumber: nextNum,
+    entryDate,
+    sourceType: "inventory_adjustment",
+    sourceId: movementId,
+    description: entryDescription,
+    lines: [lineMercaderias, lineOffset],
+  })
+  ops.push(...ledger.ops)
 
-  const { error: linesErr } = await supabase.from("accounting_entry_lines").insert(
-    [lineMercaderias, lineOffset].map((l) => ({ ...l, entry_id: entryId })),
-  )
-  if (linesErr) {
-    await supabase.from("accounting_entries").delete().eq("id", entryId)
-    await undoFifoAfterMovementFailure(movementId)
-    return {
-      success: false,
-      error: linesErr.message || "No se pudieron crear las líneas del asiento.",
-      status: 500,
-    }
+  const applied = await applyWithAudit(supabase, {
+    kind: "inventory.adjust",
+    ctx: audit,
+    popId,
+    resourceId: movementId,
+    previous: null,
+    next: { movementId, quantityDelta: delta, articleId: input.articleId },
+    ops,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
-
-  const { error: postErr } = await supabase
-    .from("accounting_entries")
-    .update({
-      status: "posted",
-      posted_at: new Date().toISOString(),
-      posted_by: userId,
-    })
-    .eq("id", entryId)
-  if (postErr) {
-    await supabase.from("accounting_entries").delete().eq("id", entryId)
-    await undoFifoAfterMovementFailure(movementId)
-    return {
-      success: false,
-      error: postErr.message || "No se pudo registrar el asiento.",
-      status: 500,
-    }
-  }
-
   return { success: true }
 }
 
@@ -463,18 +388,27 @@ export async function deleteInventoryMovement(
   supabase: SupabaseClient,
   popId: string,
   movementId: string,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
-  const { error } = await supabase
+  const { data: existing } = await supabase
     .from("inventory_movements")
-    .delete()
+    .select("id, article_id, quantity_delta")
     .eq("id", movementId)
     .eq("pop_id", popId)
-  if (error) {
-    return {
-      success: false,
-      error: error.message || "No se pudo eliminar.",
-      status: 500,
-    }
+    .maybeSingle()
+  if (!existing?.id) {
+    return { success: false, error: "No se encontró el movimiento.", status: 404 }
+  }
+  const applied = await auditedDelete(supabase, {
+    kind: "inventory.movement.delete",
+    table: "inventory_movements",
+    id: movementId,
+    ctx: audit,
+    popId,
+    previous: existing,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
   return { success: true }
 }
@@ -483,6 +417,7 @@ export async function applyInventoryMinStockRecommendations(
   supabase: SupabaseClient,
   popId: string,
   input: ApplyMinStockBody,
+  audit: MutationAuditCtx,
 ): Promise<ApplyResult> {
   const built = await listInventoryArticleRows(supabase, popId)
   if (!built.success) {
@@ -501,21 +436,23 @@ export async function applyInventoryMinStockRecommendations(
       status: 400,
     }
   }
-  let applied = 0
-  for (const row of pending) {
-    const { error } = await supabase
-      .from("articles")
-      .update({ min_stock_level: row.suggestedMin })
-      .eq("id", row.articleId)
-      .eq("pop_id", popId)
-    if (error) {
-      return {
-        success: false,
-        error: error.message || "No se pudieron guardar los mínimos.",
-        status: 500,
-      }
-    }
-    applied += 1
+  const ops: AuditOp[] = pending.map((row) => ({
+    op: "update",
+    table: "articles",
+    id: row.articleId,
+    row: { min_stock_level: row.suggestedMin },
+  }))
+  const applied = await applyWithAudit(supabase, {
+    kind: "inventory.min_stock",
+    ctx: audit,
+    popId,
+    resourceId: pending[0]?.articleId ?? null,
+    previous: null,
+    next: { applied: pending.length },
+    ops,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
-  return { success: true, data: { applied } }
+  return { success: true, data: { applied: pending.length } }
 }

@@ -1,4 +1,10 @@
 import type { SupabaseClient } from "@supabase/supabase-js"
+import { applyWithAudit } from "../../audit/apply.js"
+import {
+  nextAccountingEntryNumber,
+  postedAccountingEntryOps,
+} from "../../audit/ledgerOps.js"
+import type { AuditOp, MutationAuditCtx } from "../../audit/types.js"
 import {
   entryDateIsoInTimezone,
   timezoneForPopLedger,
@@ -21,16 +27,6 @@ type CloseResult =
   | { success: true }
   | { success: false; error: string; status: 400 | 403 | 404 | 409 | 500 }
 
-async function cancelAccountingEntry(
-  supabase: SupabaseClient,
-  entryId: string,
-) {
-  await supabase
-    .from("accounting_entries")
-    .update({ status: "cancelled", updated_at: new Date().toISOString() })
-    .eq("id", entryId)
-}
-
 export async function closeCashSession(
   supabase: SupabaseClient,
   popId: string,
@@ -40,6 +36,7 @@ export async function closeCashSession(
   keys: readonly string[],
   isOwner: boolean,
   snapshot: CloseSessionBody,
+  audit: MutationAuditCtx,
 ): Promise<CloseResult> {
   const cash = parseMoney(snapshot.cash)
   const pm: Record<string, number> = {}
@@ -111,7 +108,6 @@ export async function closeCashSession(
     return { success: false, error: teorRes.error, status: 400 }
   }
   const cashDiff = roundMoney(cash - teorRes.teorico)
-  let arqueoEntryId: string | null = null
 
   const cobrosByKind = await loadSessionNonCashCobrosByKind(
     supabase,
@@ -167,6 +163,8 @@ export async function closeCashSession(
     entryLines = entryLines.concat(pmLinesRes.lines)
   }
 
+  const ops: AuditOp[] = []
+
   if (entryLines.length > 0) {
     const { data: pop } = await supabase
       .from("pops")
@@ -175,100 +173,50 @@ export async function closeCashSession(
       .maybeSingle()
     const tz = timezoneForPopLedger(pop?.country, popSiteId)
     const entryDate = entryDateIsoInTimezone(tz)
-
-    const { data: maxRow } = await supabase
-      .from("accounting_entries")
-      .select("entry_number")
-      .eq("pop_id", popId)
-      .order("entry_number", { ascending: false })
-      .limit(1)
-      .maybeSingle()
-    const nextNum =
-      maxRow?.entry_number != null && Number.isFinite(Number(maxRow.entry_number))
-        ? Number(maxRow.entry_number) + 1
-        : 1
-
-    const { data: entIns, error: entErr } = await supabase
-      .from("accounting_entries")
-      .insert({
-        pop_id: popId,
-        entry_number: nextNum,
-        entry_date: entryDate,
-        source_type: "cash_register_close",
-        source_id: sessionId,
-        description: "Ajustes de cierre de caja (arqueo y liquidación)",
-        status: "draft",
-        created_by: userId,
-      })
-      .select("id")
-      .single()
-    if (entErr || !entIns?.id) {
-      return {
-        success: false,
-        error: entErr?.message || "No se pudo crear el asiento de arqueo.",
-        status: 500,
-      }
-    }
-    arqueoEntryId = String(entIns.id)
-
-    const { error: linesErr } = await supabase
-      .from("accounting_entry_lines")
-      .insert(entryLines.map((line) => ({ ...line, entry_id: arqueoEntryId })))
-    if (linesErr) {
-      await cancelAccountingEntry(supabase, arqueoEntryId)
-      return {
-        success: false,
-        error: linesErr.message || "No se pudo registrar el asiento de arqueo.",
-        status: 500,
-      }
-    }
-
-    const { error: postErr } = await supabase
-      .from("accounting_entries")
-      .update({
-        status: "posted",
-        posted_at: new Date().toISOString(),
-        posted_by: userId,
-      })
-      .eq("id", arqueoEntryId)
-    if (postErr) {
-      await cancelAccountingEntry(supabase, arqueoEntryId)
-      return {
-        success: false,
-        error: postErr.message || "No se pudo registrar el asiento de arqueo.",
-        status: 500,
-      }
-    }
+    const nextNum = await nextAccountingEntryNumber(supabase, popId)
+    const description = "Ajustes de cierre de caja (arqueo y liquidación)"
+    const ledger = postedAccountingEntryOps({
+      popId,
+      userId,
+      entryNumber: nextNum,
+      entryDate,
+      sourceType: "cash_register_close",
+      sourceId: sessionId,
+      description,
+      lines: entryLines.map((line) => ({
+        account_id: line.account_id,
+        debit_amount: line.debit_amount,
+        credit_amount: line.credit_amount,
+        description: line.description ?? description,
+        line_order: line.line_order,
+      })),
+    })
+    ops.push(...ledger.ops)
   }
 
-  const { data: closedRow, error } = await supabase
-    .from("cash_register_sessions")
-    .update({
+  ops.push({
+    op: "update",
+    table: "cash_register_sessions",
+    id: sessionId,
+    row: {
       status: "closed",
       closed_at: new Date().toISOString(),
       closed_by: userId,
       closing_snapshot,
-    })
-    .eq("id", sessionId)
-    .eq("pop_id", popId)
-    .eq("status", "open")
-    .select("id")
-    .maybeSingle()
-  if (error) {
-    if (arqueoEntryId) await cancelAccountingEntry(supabase, arqueoEntryId)
-    return {
-      success: false,
-      error: error.message || "No se pudo cerrar el turno.",
-      status: 500,
-    }
-  }
-  if (!closedRow) {
-    if (arqueoEntryId) await cancelAccountingEntry(supabase, arqueoEntryId)
-    return {
-      success: false,
-      error: "El turno no existe o ya está cerrado.",
-      status: 409,
-    }
+    },
+  })
+
+  const applied = await applyWithAudit(supabase, {
+    kind: "cash_registers.session.close",
+    ctx: audit,
+    popId,
+    resourceId: sessionId,
+    previous: { status: "open" },
+    next: { status: "closed", closing_snapshot },
+    ops: ops,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
   return { success: true }
 }

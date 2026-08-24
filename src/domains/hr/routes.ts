@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import { z } from "zod"
 import type { SidecarEnv } from "../../sidecar/pop.js"
 import { hasAnyPermission, requireAnyPermission } from "../../sidecar/permissions.js"
+import { requireMutationPermission } from "../../sidecar/mutationPermission.js"
 import { HR_READ, HR_WRITE } from "./allowlist.js"
 import {
   getClockStation,
@@ -18,6 +19,7 @@ import {
   markEmployeeReturned,
   removeEmployeeFranco,
   rotateEmployeeClockPin,
+  updateEmployee,
   upsertEmployee,
 } from "./employees.js"
 import { loadHrPaymentContext, recordEmployeePayment } from "./payments.js"
@@ -42,6 +44,7 @@ import {
   roleGrantsBodySchema,
   upsertEmployeeBodySchema,
 } from "./schema.js"
+import { parsePatchBody } from "../../lib/patchBody.js"
 
 const idSchema = z.string().uuid()
 
@@ -102,7 +105,7 @@ hrRoutes.get(
 
 hrRoutes.post(
   "/employees",
-  requireAnyPermission(HR_WRITE),
+  requireMutationPermission(HR_WRITE),
   async (c) => {
     const body = upsertEmployeeBodySchema.safeParse(
       await c.req.json().catch(() => null),
@@ -112,6 +115,7 @@ hrRoutes.post(
       c.get("supabase"),
       c.get("sidecar").popId,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json({ success: true, data: { id: result.id } }, 201)
@@ -120,20 +124,24 @@ hrRoutes.post(
 
 hrRoutes.patch(
   "/employees/:employeeId",
-  requireAnyPermission(HR_WRITE),
+  requireMutationPermission(HR_WRITE),
   async (c) => {
     const employeeId = idSchema.safeParse(c.req.param("employeeId"))
     if (!employeeId.success) {
       return c.json({ success: false, error: "Persona inválida" }, 400)
     }
-    const body = upsertEmployeeBodySchema.safeParse(
+    const body = parsePatchBody(
+      upsertEmployeeBodySchema,
       await c.req.json().catch(() => null),
     )
-    if (!body.success) return c.json(bodyError(body.error.issues), 400)
-    const result = await upsertEmployee(
+    if (!body.success) return c.json({ success: false, error: body.error }, 400)
+    const { id: _ignored, ...patch } = body.data
+    const result = await updateEmployee(
       c.get("supabase"),
       c.get("sidecar").popId,
-      { ...body.data, id: employeeId.data },
+      employeeId.data,
+      patch,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json({ success: true, data: { id: result.id } })
@@ -142,7 +150,7 @@ hrRoutes.patch(
 
 hrRoutes.post(
   "/employees/:employeeId/left",
-  requireAnyPermission(HR_WRITE),
+  requireMutationPermission(HR_WRITE),
   async (c) => {
     const employeeId = idSchema.safeParse(c.req.param("employeeId"))
     if (!employeeId.success) {
@@ -152,6 +160,7 @@ hrRoutes.post(
       c.get("supabase"),
       c.get("sidecar").popId,
       employeeId.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -160,7 +169,7 @@ hrRoutes.post(
 
 hrRoutes.post(
   "/employees/:employeeId/returned",
-  requireAnyPermission(HR_WRITE),
+  requireMutationPermission(HR_WRITE),
   async (c) => {
     const employeeId = idSchema.safeParse(c.req.param("employeeId"))
     if (!employeeId.success) {
@@ -170,6 +179,7 @@ hrRoutes.post(
       c.get("supabase"),
       c.get("sidecar").popId,
       employeeId.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -178,7 +188,7 @@ hrRoutes.post(
 
 hrRoutes.post(
   "/employees/:employeeId/clock-in",
-  requireAnyPermission(HR_WRITE),
+  requireMutationPermission(HR_WRITE),
   async (c) => {
     const employeeId = idSchema.safeParse(c.req.param("employeeId"))
     if (!employeeId.success) {
@@ -190,6 +200,7 @@ hrRoutes.post(
       sidecar.popId,
       sidecar.popSiteId,
       employeeId.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -285,7 +296,7 @@ hrRoutes.post(
 
 hrRoutes.post(
   "/employees/:employeeId/clock-out",
-  requireAnyPermission(HR_WRITE),
+  requireMutationPermission(HR_WRITE),
   async (c) => {
     const employeeId = idSchema.safeParse(c.req.param("employeeId"))
     if (!employeeId.success) {
@@ -295,6 +306,7 @@ hrRoutes.post(
       c.get("supabase"),
       c.get("sidecar").popId,
       employeeId.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -303,7 +315,7 @@ hrRoutes.post(
 
 hrRoutes.post(
   "/employees/:employeeId/francos",
-  requireAnyPermission(HR_WRITE),
+  requireMutationPermission(HR_WRITE),
   async (c) => {
     const employeeId = idSchema.safeParse(c.req.param("employeeId"))
     if (!employeeId.success) {
@@ -319,6 +331,7 @@ hrRoutes.post(
       employeeId.data,
       body.data.day,
       body.data.kind,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -340,7 +353,7 @@ hrRoutes.get(
 
 hrRoutes.post(
   "/employees/:employeeId/payments",
-  requireAnyPermission(HR_WRITE),
+  requireMutationPermission(HR_WRITE),
   async (c) => {
     const employeeId = idSchema.safeParse(c.req.param("employeeId"))
     if (!employeeId.success) {
@@ -356,6 +369,7 @@ hrRoutes.post(
       c.get("userId"),
       employeeId.data,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result, 201)
@@ -364,7 +378,7 @@ hrRoutes.post(
 
 hrRoutes.delete(
   "/employees/:employeeId/francos/:francoId",
-  requireAnyPermission(HR_WRITE),
+  requireMutationPermission(HR_WRITE),
   async (c) => {
     const employeeId = idSchema.safeParse(c.req.param("employeeId"))
     const francoId = idSchema.safeParse(c.req.param("francoId"))
@@ -376,13 +390,14 @@ hrRoutes.delete(
       c.get("sidecar").popId,
       employeeId.data,
       francoId.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
   },
 )
 
-hrRoutes.post("/invitations", requireAnyPermission(HR_WRITE), async (c) => {
+hrRoutes.post("/invitations", requireMutationPermission(HR_WRITE), async (c) => {
   const body = inviteBodySchema.safeParse(await c.req.json().catch(() => null))
   if (!body.success) return c.json(bodyError(body.error.issues), 400)
   const result = await createInvitation(
@@ -391,6 +406,7 @@ hrRoutes.post("/invitations", requireAnyPermission(HR_WRITE), async (c) => {
     c.get("userId"),
     null,
     body.data,
+    c.get("mutationAudit"),
   )
   if (!result.success) return c.json(result, result.status)
   return c.json(
@@ -408,7 +424,7 @@ hrRoutes.post("/invitations", requireAnyPermission(HR_WRITE), async (c) => {
 
 hrRoutes.post(
   "/invitations/:invitationId/revoke",
-  requireAnyPermission(HR_WRITE),
+  requireMutationPermission(HR_WRITE),
   async (c) => {
     const invitationId = idSchema.safeParse(c.req.param("invitationId"))
     if (!invitationId.success) {
@@ -418,6 +434,7 @@ hrRoutes.post(
       c.get("supabase"),
       c.get("sidecar").popId,
       invitationId.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -426,7 +443,7 @@ hrRoutes.post(
 
 hrRoutes.post(
   "/invitations/:invitationId/renew",
-  requireAnyPermission(HR_WRITE),
+  requireMutationPermission(HR_WRITE),
   async (c) => {
     const invitationId = idSchema.safeParse(c.req.param("invitationId"))
     if (!invitationId.success) {
@@ -439,6 +456,7 @@ hrRoutes.post(
       c.get("supabase"),
       c.get("sidecar").popId,
       invitationId.data,
+      c.get("mutationAudit"),
       body.success ? body.data.inviteBaseUrl : undefined,
     )
     if (!result.success) return c.json(result, result.status)
@@ -446,7 +464,7 @@ hrRoutes.post(
   },
 )
 
-hrRoutes.patch("/members/:userId/role", requireAnyPermission(HR_WRITE), async (c) => {
+hrRoutes.patch("/members/:userId/role", requireMutationPermission(HR_WRITE), async (c) => {
   const userId = idSchema.safeParse(c.req.param("userId"))
   if (!userId.success) {
     return c.json({ success: false, error: "Miembro inválido" }, 400)
@@ -465,12 +483,13 @@ hrRoutes.patch("/members/:userId/role", requireAnyPermission(HR_WRITE), async (c
     typeof pop?.owner_user_id === "string" ? pop.owner_user_id : null,
     userId.data,
     body.data.roleId,
+    c.get("mutationAudit"),
   )
   if (!result.success) return c.json(result, result.status)
   return c.json(result)
 })
 
-hrRoutes.post("/members/:userId/deactivate", requireAnyPermission(HR_WRITE), async (c) => {
+hrRoutes.post("/members/:userId/deactivate", requireMutationPermission(HR_WRITE), async (c) => {
   const userId = idSchema.safeParse(c.req.param("userId"))
   if (!userId.success) {
     return c.json({ success: false, error: "Miembro inválido" }, 400)
@@ -486,12 +505,13 @@ hrRoutes.post("/members/:userId/deactivate", requireAnyPermission(HR_WRITE), asy
     c.get("sidecar").popId,
     typeof pop?.owner_user_id === "string" ? pop.owner_user_id : null,
     userId.data,
+    c.get("mutationAudit"),
   )
   if (!result.success) return c.json(result, result.status)
   return c.json(result)
 })
 
-hrRoutes.post("/members/:userId/reactivate", requireAnyPermission(HR_WRITE), async (c) => {
+hrRoutes.post("/members/:userId/reactivate", requireMutationPermission(HR_WRITE), async (c) => {
   const userId = idSchema.safeParse(c.req.param("userId"))
   if (!userId.success) {
     return c.json({ success: false, error: "Miembro inválido" }, 400)
@@ -507,12 +527,13 @@ hrRoutes.post("/members/:userId/reactivate", requireAnyPermission(HR_WRITE), asy
     c.get("sidecar").popId,
     typeof pop?.owner_user_id === "string" ? pop.owner_user_id : null,
     userId.data,
+    c.get("mutationAudit"),
   )
   if (!result.success) return c.json(result, result.status)
   return c.json(result)
 })
 
-hrRoutes.delete("/members/:userId", requireAnyPermission(HR_WRITE), async (c) => {
+hrRoutes.delete("/members/:userId", requireMutationPermission(HR_WRITE), async (c) => {
   const userId = idSchema.safeParse(c.req.param("userId"))
   if (!userId.success) {
     return c.json({ success: false, error: "Miembro inválido" }, 400)
@@ -528,6 +549,7 @@ hrRoutes.delete("/members/:userId", requireAnyPermission(HR_WRITE), async (c) =>
     c.get("sidecar").popId,
     typeof pop?.owner_user_id === "string" ? pop.owner_user_id : null,
     userId.data,
+    c.get("mutationAudit"),
   )
   if (!result.success) return c.json(result, result.status)
   return c.json(result)
@@ -547,7 +569,7 @@ hrRoutes.get("/roles/:roleId", requireAnyPermission(HR_WRITE), async (c) => {
   return c.json(result)
 })
 
-hrRoutes.post("/roles", requireAnyPermission(HR_WRITE), async (c) => {
+hrRoutes.post("/roles", requireMutationPermission(HR_WRITE), async (c) => {
   const body = createRoleBodySchema.safeParse(await c.req.json().catch(() => null))
   if (!body.success) return c.json(bodyError(body.error.issues), 400)
   const result = await createRole(
@@ -555,12 +577,13 @@ hrRoutes.post("/roles", requireAnyPermission(HR_WRITE), async (c) => {
     c.get("sidecar").popId,
     body.data.displayName,
     body.data.grantKeys,
+    body.data.canApprove,
   )
   if (!result.success) return c.json(result, result.status)
   return c.json({ success: true, data: { roleId: result.roleId } }, 201)
 })
 
-hrRoutes.patch("/roles/:roleId", requireAnyPermission(HR_WRITE), async (c) => {
+hrRoutes.patch("/roles/:roleId", requireMutationPermission(HR_WRITE), async (c) => {
   const roleId = idSchema.safeParse(c.req.param("roleId"))
   if (!roleId.success) {
     return c.json({ success: false, error: "Rol inválido" }, 400)
@@ -572,12 +595,13 @@ hrRoutes.patch("/roles/:roleId", requireAnyPermission(HR_WRITE), async (c) => {
     c.get("sidecar").popId,
     roleId.data,
     body.data.grantKeys,
+    body.data.canApprove,
   )
   if (!result.success) return c.json(result, result.status)
   return c.json(result)
 })
 
-hrRoutes.delete("/roles/:roleId", requireAnyPermission(HR_WRITE), async (c) => {
+hrRoutes.delete("/roles/:roleId", requireMutationPermission(HR_WRITE), async (c) => {
   const roleId = idSchema.safeParse(c.req.param("roleId"))
   if (!roleId.success) {
     return c.json({ success: false, error: "Rol inválido" }, 400)

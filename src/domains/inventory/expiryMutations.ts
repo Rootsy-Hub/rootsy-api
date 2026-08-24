@@ -1,4 +1,8 @@
+import { randomUUID } from "node:crypto"
 import type { SupabaseClient } from "@supabase/supabase-js"
+import { applyWithAudit } from "../../audit/apply.js"
+import { auditedUpdate } from "../../audit/simpleWrite.js"
+import type { MutationAuditCtx } from "../../audit/types.js"
 import { parseInventoryExpiresAt } from "./expiry.js"
 import { parseQty } from "./qty.js"
 import type { SetExpiryBody } from "./schema.js"
@@ -12,6 +16,7 @@ export async function setInventoryLayerExpiry(
   popId: string,
   layerId: string,
   input: SetExpiryBody,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const expiresAt = parseInventoryExpiresAt(input.expiresAt)
   const id = layerId.trim()
@@ -59,17 +64,18 @@ export async function setInventoryLayerExpiry(
   }
 
   if (qtyRaw >= remaining - 1e-6) {
-    const { error } = await supabase
-      .from("inventory_cost_layers")
-      .update({ expires_at: expiresAt })
-      .eq("id", id)
-      .eq("pop_id", popId)
-    if (error) {
-      return {
-        success: false,
-        error: error.message || "No se pudo guardar la fecha.",
-        status: 500,
-      }
+    const applied = await auditedUpdate(supabase, {
+      kind: "inventory.expiry",
+      table: "inventory_cost_layers",
+      id,
+      row: { expires_at: expiresAt },
+      ctx: audit,
+      popId,
+      previous: { expires_at: layer.expires_at },
+      next: { expires_at: expiresAt },
+    })
+    if (!applied.success) {
+      return { success: false, error: applied.error, status: applied.status }
     }
     return { success: true }
   }
@@ -80,48 +86,43 @@ export async function setInventoryLayerExpiry(
     return { success: false, error: "No se puede partir esa capa.", status: 400 }
   }
 
-  const { error: shrinkErr } = await supabase
-    .from("inventory_cost_layers")
-    .update({
-      quantity_remaining: leftover,
-      quantity_received: receivedAfter,
-    })
-    .eq("id", id)
-    .eq("pop_id", popId)
-  if (shrinkErr) {
-    return {
-      success: false,
-      error: shrinkErr.message || "No se pudo partir la capa.",
-      status: 500,
-    }
-  }
-
-  const { error: insertErr } = await supabase.from("inventory_cost_layers").insert({
-    pop_id: popId,
-    location_id: layer.location_id,
-    article_id: layer.article_id,
-    source_movement_id: layer.source_movement_id,
-    quantity_received: qtyRaw,
-    quantity_remaining: qtyRaw,
-    unit_cost: layer.unit_cost,
-    received_at: layer.received_at,
-    expires_at: expiresAt,
+  const applied = await applyWithAudit(supabase, {
+    kind: "inventory.expiry",
+    ctx: audit,
+    popId,
+    resourceId: id,
+    previous: { quantity_remaining: remaining, expires_at: layer.expires_at },
+    next: { splitQty: qtyRaw, expires_at: expiresAt },
+    ops: [
+      {
+        op: "update",
+        table: "inventory_cost_layers",
+        id,
+        row: {
+          quantity_remaining: leftover,
+          quantity_received: receivedAfter,
+        },
+      },
+      {
+        op: "insert",
+        table: "inventory_cost_layers",
+        row: {
+          id: randomUUID(),
+          pop_id: popId,
+          location_id: layer.location_id,
+          article_id: layer.article_id,
+          source_movement_id: layer.source_movement_id,
+          quantity_received: qtyRaw,
+          quantity_remaining: qtyRaw,
+          unit_cost: layer.unit_cost,
+          received_at: layer.received_at,
+          expires_at: expiresAt,
+        },
+      },
+    ],
   })
-  if (insertErr) {
-    await supabase
-      .from("inventory_cost_layers")
-      .update({
-        quantity_remaining: remaining,
-        quantity_received: received,
-      })
-      .eq("id", id)
-      .eq("pop_id", popId)
-    return {
-      success: false,
-      error: insertErr.message || "No se pudo crear el lote partido.",
-      status: 500,
-    }
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
-
   return { success: true }
 }

@@ -1,4 +1,12 @@
+import { randomUUID } from "node:crypto"
 import type { SupabaseClient } from "@supabase/supabase-js"
+import { applyWithAudit } from "../../audit/apply.js"
+import {
+  auditedDelete,
+  auditedInsert,
+  auditedUpdate,
+} from "../../audit/simpleWrite.js"
+import type { MutationAuditCtx } from "../../audit/types.js"
 import { sameUserId } from "./ids.js"
 import type { MemberRow, PendingInviteRow, PopRoleRow } from "./schema.js"
 
@@ -196,6 +204,7 @@ export async function createInvitation(
     message?: string | null
     inviteBaseUrl?: string
   },
+  audit: MutationAuditCtx,
 ): Promise<
   | { success: true; inviteUrl: string; email: string; popName: string }
   | { success: false; error: string; status: 400 | 404 | 409 | 500 }
@@ -300,34 +309,41 @@ export async function createInvitation(
     }
   }
 
-  const { data: inserted, error: insErr } = await supabase
-    .from("pop_invitations")
-    .insert({
-      pop_id: popId,
-      email,
-      employee_id: input.employeeId,
-      role_id: input.roleId,
-      invited_by: invitedBy,
-      message: input.message?.trim() || null,
-    })
-    .select("token")
-    .single()
-
-  if (insErr) {
-    if (insErr.code === "23505") {
+  const invitationId = randomUUID()
+  const token = randomUUID()
+  const row = {
+    id: invitationId,
+    pop_id: popId,
+    email,
+    employee_id: input.employeeId,
+    role_id: input.roleId,
+    invited_by: invitedBy,
+    message: input.message?.trim() || null,
+    token,
+  }
+  const applied = await auditedInsert(supabase, {
+    kind: "hr.invitation.create",
+    table: "pop_invitations",
+    row,
+    ctx: audit,
+    popId,
+  })
+  if (!applied.success) {
+    const msg = applied.error || "No se pudo crear la invitación."
+    if (msg.includes("23505") || msg.toLowerCase().includes("duplicate")) {
       return {
         success: false,
         error: "Ya hay una invitación pendiente para esa persona.",
         status: 409,
       }
     }
-    return { success: false, error: insErr.message, status: 500 }
+    return { success: false, error: msg, status: applied.status }
   }
 
   const base = (input.inviteBaseUrl || "").replace(/\/$/, "")
   return {
     success: true,
-    inviteUrl: inserted.token && base ? `${base}/invite/pop/${inserted.token}` : "",
+    inviteUrl: token && base ? `${base}/invite/pop/${token}` : "",
     email,
     popName: String(pop.name ?? ""),
   }
@@ -337,14 +353,30 @@ export async function revokeInvitation(
   supabase: SupabaseClient,
   popId: string,
   invitationId: string,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
-  const { error } = await supabase
+  const { data: existing } = await supabase
     .from("pop_invitations")
-    .update({ status: "revoked" })
+    .select("id, status")
     .eq("id", invitationId)
     .eq("pop_id", popId)
     .eq("status", "pending")
-  if (error) return { success: false, error: error.message, status: 500 }
+    .maybeSingle()
+  if (!existing?.id) return { success: true }
+
+  const applied = await auditedUpdate(supabase, {
+    kind: "hr.invitation.revoke",
+    table: "pop_invitations",
+    id: invitationId,
+    row: { status: "revoked" },
+    ctx: audit,
+    popId,
+    previous: existing,
+    next: { ...existing, status: "revoked" },
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
+  }
   return { success: true }
 }
 
@@ -352,29 +384,42 @@ export async function renewInvitation(
   supabase: SupabaseClient,
   popId: string,
   invitationId: string,
+  audit: MutationAuditCtx,
   inviteBaseUrl?: string,
 ): Promise<
   | { success: true; inviteUrl: string }
-  | { success: false; error: string; status: 404 | 500 }
+  | { success: false; error: string; status: 400 | 404 | 500 }
 > {
-  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
-  const { data, error } = await supabase
+  const { data: existing, error: lookErr } = await supabase
     .from("pop_invitations")
-    .update({ expires_at: expiresAt })
+    .select("id, token, status")
     .eq("id", invitationId)
     .eq("pop_id", popId)
     .eq("status", "pending")
-    .select("token")
     .maybeSingle()
-
-  if (error) return { success: false, error: error.message, status: 500 }
-  if (!data) {
+  if (lookErr) return { success: false, error: lookErr.message, status: 500 }
+  if (!existing) {
     return { success: false, error: "No encontramos esa invitación.", status: 404 }
+  }
+
+  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
+  const applied = await auditedUpdate(supabase, {
+    kind: "hr.invitation.renew",
+    table: "pop_invitations",
+    id: invitationId,
+    row: { expires_at: expiresAt },
+    ctx: audit,
+    popId,
+    previous: existing,
+    next: { ...existing, expires_at: expiresAt },
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
   const base = (inviteBaseUrl || "").replace(/\/$/, "")
   return {
     success: true,
-    inviteUrl: data.token && base ? `${base}/invite/pop/${data.token}` : "",
+    inviteUrl: existing.token && base ? `${base}/invite/pop/${existing.token}` : "",
   }
 }
 
@@ -383,6 +428,7 @@ export async function deactivateMember(
   popId: string,
   ownerUserId: string | null,
   memberUserId: string,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   if (ownerUserId && sameUserId(memberUserId, ownerUserId)) {
     return {
@@ -392,13 +438,32 @@ export async function deactivateMember(
     }
   }
 
-  const { error } = await supabase
+  const { data: rows, error } = await supabase
     .from("user_pop_roles")
-    .update({ is_active: false })
+    .select("id, is_active")
     .eq("pop_id", popId)
     .eq("user_id", memberUserId)
-
   if (error) return { success: false, error: error.message, status: 500 }
+  const targets = (rows ?? []).filter((row) => row.is_active !== false)
+  if (targets.length === 0) return { success: true }
+
+  const applied = await applyWithAudit(supabase, {
+    kind: "hr.member.deactivate",
+    ctx: audit,
+    popId,
+    resourceId: memberUserId,
+    previous: targets,
+    next: { is_active: false },
+    ops: targets.map((row) => ({
+      op: "update" as const,
+      table: "user_pop_roles",
+      id: String(row.id),
+      row: { is_active: false },
+    })),
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
+  }
   return { success: true }
 }
 
@@ -407,6 +472,7 @@ export async function reactivateMember(
   popId: string,
   ownerUserId: string | null,
   memberUserId: string,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   if (ownerUserId && sameUserId(memberUserId, ownerUserId)) {
     return {
@@ -451,12 +517,19 @@ export async function reactivateMember(
     }
   }
 
-  const { error } = await supabase
-    .from("user_pop_roles")
-    .update({ is_active: true, updated_at: new Date().toISOString() })
-    .eq("id", membership.id)
-
-  if (error) return { success: false, error: error.message, status: 500 }
+  const applied = await auditedUpdate(supabase, {
+    kind: "hr.member.reactivate",
+    table: "user_pop_roles",
+    id: String(membership.id),
+    row: { is_active: true, updated_at: new Date().toISOString() },
+    ctx: audit,
+    popId,
+    previous: membership,
+    next: { ...membership, is_active: true },
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
+  }
   return { success: true }
 }
 
@@ -466,6 +539,7 @@ export async function updateMemberRole(
   ownerUserId: string | null,
   memberUserId: string,
   roleId: string,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   if (ownerUserId && sameUserId(memberUserId, ownerUserId)) {
     return {
@@ -509,12 +583,27 @@ export async function updateMemberRole(
   }
   if (membership.role_id === roleId) return { success: true }
 
-  const { error } = await supabase
-    .from("user_pop_roles")
-    .update({ role_id: roleId })
-    .eq("id", membership.id)
+  const applied = await auditedUpdate(supabase, {
+    kind: "hr.member.role",
+    table: "user_pop_roles",
+    id: String(membership.id),
+    row: { role_id: roleId },
+    ctx: audit,
+    popId,
+    previous: membership,
+    next: { ...membership, role_id: roleId },
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
+  }
 
-  if (error) return { success: false, error: error.message, status: 500 }
+  const { error: wipeErr } = await supabase.rpc(
+    "rootsy_wipe_approval_code_for_user",
+    { p_pop_id: popId, p_user_id: memberUserId },
+  )
+  if (wipeErr) {
+    return { success: false, error: wipeErr.message, status: 500 }
+  }
   return { success: true }
 }
 
@@ -523,6 +612,7 @@ export async function deleteInactiveMember(
   popId: string,
   ownerUserId: string | null,
   memberUserId: string,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   if (ownerUserId && sameUserId(memberUserId, ownerUserId)) {
     return {
@@ -532,13 +622,46 @@ export async function deleteInactiveMember(
     }
   }
 
-  const { error } = await supabase
+  const { data: rows, error } = await supabase
     .from("user_pop_roles")
-    .delete()
+    .select("id")
     .eq("pop_id", popId)
     .eq("user_id", memberUserId)
     .eq("is_active", false)
-
   if (error) return { success: false, error: error.message, status: 500 }
+  const targets = rows ?? []
+  if (targets.length === 0) return { success: true }
+
+  if (targets.length === 1) {
+    const applied = await auditedDelete(supabase, {
+      kind: "hr.member.delete",
+      table: "user_pop_roles",
+      id: String(targets[0].id),
+      ctx: audit,
+      popId,
+      previous: targets[0],
+    })
+    if (!applied.success) {
+      return { success: false, error: applied.error, status: applied.status }
+    }
+    return { success: true }
+  }
+
+  const applied = await applyWithAudit(supabase, {
+    kind: "hr.member.delete",
+    ctx: audit,
+    popId,
+    resourceId: memberUserId,
+    previous: targets,
+    next: null,
+    ops: targets.map((row) => ({
+      op: "delete" as const,
+      table: "user_pop_roles",
+      id: String(row.id),
+    })),
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
+  }
   return { success: true }
 }

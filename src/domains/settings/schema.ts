@@ -20,6 +20,7 @@ export const updateBusinessBodySchema = z.object({
 })
 
 export type UpdateBusinessBody = z.infer<typeof updateBusinessBodySchema>
+export type PatchBusinessBody = Partial<UpdateBusinessBody>
 
 export const updateFiscalBodySchema = z.object({
   fiscalCuit: z.string().optional().default(""),
@@ -31,6 +32,7 @@ export const updateFiscalBodySchema = z.object({
 })
 
 export type UpdateFiscalBody = z.infer<typeof updateFiscalBodySchema>
+export type PatchFiscalBody = Partial<UpdateFiscalBody>
 
 export const updateImagesBodySchema = z.object({
   imageUrl: z.string().nullable().optional(),
@@ -39,6 +41,7 @@ export const updateImagesBodySchema = z.object({
 })
 
 export type UpdateImagesBody = z.infer<typeof updateImagesBodySchema>
+export type PatchImagesBody = Partial<UpdateImagesBody>
 
 export const settingsImageKindSchema = z.enum(SETTINGS_IMAGE_KINDS)
 

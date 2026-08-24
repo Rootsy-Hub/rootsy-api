@@ -1,14 +1,14 @@
+import { randomUUID } from "node:crypto"
 import type { SupabaseClient } from "@supabase/supabase-js"
+import { applyWithAudit } from "../../audit/apply.js"
+import type { AuditOp, MutationAuditCtx } from "../../audit/types.js"
 import {
   currentAccountDocumentKindForDirection,
   currentAccountOpenAmount,
   roundMoney,
 } from "./accounts.js"
 import { loadOpenDocuments, loadPopTimeZone } from "./documents.js"
-import {
-  cancelCurrentAccountAccountingEntry,
-  postCurrentAccountReceiptLedger,
-} from "./ledger.js"
+import { buildCurrentAccountReceiptLedgerOps } from "./ledger.js"
 import type { CurrentAccountDirection, SettleBody } from "./schema.js"
 
 type MutateResult =
@@ -168,6 +168,7 @@ export async function settleCurrentAccount(
   siteId: string,
   userId: string,
   input: SettleBody,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const requested = new Map<string, number>()
   for (const row of input.applications) {
@@ -234,6 +235,7 @@ export async function settleCurrentAccount(
   const checkFlow = input.direction === "payable" ? "purchase" : "sale"
   let treasuryAccountId = String(input.treasuryAccountId ?? "").trim()
   let checkId: string | null = null
+  let checkRow: Record<string, unknown> | null = null
   let cashRegisterSessionId: string | null = null
 
   if (input.paymentKind === "cash") {
@@ -268,43 +270,59 @@ export async function settleCurrentAccount(
     if (sourceKind !== "manual" && !firstApp?.documentId) {
       return { success: false, error: "Falta el comprobante de origen del cheque.", status: 400 }
     }
-    const { data, error } = await supabase
-      .from("checks")
-      .insert({
-        pop_id: popId,
-        direction: checkDirection,
-        check_number: details.checkNumber,
-        bank_name: details.bankName,
-        amount: receiptAmount,
-        issue_date: details.issueDate,
-        due_date: details.dueDate,
-        status: "in_portfolio",
-        source_kind: sourceKind,
-        source_id: firstApp?.documentId || null,
-        client_id: checkDirection === "received" ? details.partyId || null : null,
-        supplier_id: checkDirection === "issued" ? details.partyId || null : null,
-        drawer_name: checkDirection === "received" ? details.partyName || null : null,
-        payee_name: checkDirection === "issued" ? details.partyName || null : null,
-        notes: details.notes || null,
-        created_by: userId,
-      })
-      .select("id")
-      .single()
-    if (error || !data?.id) {
-      return {
-        success: false,
-        error: error?.message || "No se pudo registrar el cheque.",
-        status: 500,
-      }
+    checkId = randomUUID()
+    checkRow = {
+      id: checkId,
+      pop_id: popId,
+      direction: checkDirection,
+      check_number: details.checkNumber,
+      bank_name: details.bankName,
+      amount: receiptAmount,
+      issue_date: details.issueDate,
+      due_date: details.dueDate,
+      status: "in_portfolio",
+      source_kind: sourceKind,
+      source_id: firstApp?.documentId || null,
+      client_id: checkDirection === "received" ? details.partyId || null : null,
+      supplier_id: checkDirection === "issued" ? details.partyId || null : null,
+      drawer_name: checkDirection === "received" ? details.partyName || null : null,
+      payee_name: checkDirection === "issued" ? details.partyName || null : null,
+      notes: details.notes || null,
+      created_by: userId,
     }
-    checkId = String(data.id)
   } else if (!/^[0-9a-f-]{36}$/i.test(treasuryAccountId)) {
     return { success: false, error: "Elegí un medio de cobro o pago.", status: 400 }
   }
 
-  const { data: receiptRow, error: receiptErr } = await supabase
-    .from("current_account_receipts")
-    .insert({
+  const receiptId = randomUUID()
+  const posted = await buildCurrentAccountReceiptLedgerOps(supabase, {
+    popId,
+    userId,
+    receiptId,
+    direction: input.direction,
+    amount: receiptAmount,
+    entryDate: input.paidAt,
+    partyName,
+    paymentKind: input.paymentKind,
+    treasuryAccountId,
+  })
+  if (!posted.success) {
+    return { success: false, error: posted.error, status: 400 }
+  }
+
+  if (checkRow && checkId) {
+    checkRow.received_accounting_entry_id = posted.entryId
+  }
+
+  const ops: AuditOp[] = []
+  if (checkRow) {
+    ops.push({ op: "insert", table: "checks", row: checkRow })
+  }
+  ops.push({
+    op: "insert",
+    table: "current_account_receipts",
+    row: {
+      id: receiptId,
       pop_id: popId,
       direction: input.direction,
       client_id: input.direction === "receivable" ? input.partyId : null,
@@ -317,79 +335,36 @@ export async function settleCurrentAccount(
       cash_register_session_id: cashRegisterSessionId,
       notes,
       created_by: userId,
-    })
-    .select("id")
-    .single()
-  if (receiptErr || !receiptRow?.id) {
-    if (checkId) await supabase.from("checks").delete().eq("id", checkId)
-    return {
-      success: false,
-      error: receiptErr?.message || "No se pudo registrar el recibo.",
-      status: 500,
-    }
-  }
-  const receiptId = String(receiptRow.id)
-
-  if (applications.length > 0) {
-    const { error: appErr } = await supabase.from("current_account_applications").insert(
-      applications.map((row) => ({
+      accounting_entry_id: posted.entryId,
+    },
+  })
+  for (const row of applications) {
+    ops.push({
+      op: "insert",
+      table: "current_account_applications",
+      row: {
+        id: randomUUID(),
         pop_id: popId,
         receipt_id: receiptId,
         document_kind: kind,
         document_id: row.documentId,
         amount: row.amount,
-      })),
-    )
-    if (appErr) {
-      await supabase.from("current_account_receipts").delete().eq("id", receiptId)
-      if (checkId) await supabase.from("checks").delete().eq("id", checkId)
-      return {
-        success: false,
-        error: appErr.message || "No se pudieron imputar los comprobantes.",
-        status: 500,
-      }
-    }
+      },
+    })
   }
+  ops.push(...posted.ops)
 
-  const posted = await postCurrentAccountReceiptLedger(supabase, {
+  const applied = await applyWithAudit(supabase, {
+    kind: "current_accounts.settle",
+    ctx: audit,
     popId,
-    userId,
-    receiptId,
-    direction: input.direction,
-    amount: receiptAmount,
-    entryDate: input.paidAt,
-    partyName,
-    paymentKind: input.paymentKind,
-    treasuryAccountId,
+    resourceId: receiptId,
+    previous: null,
+    next: { id: receiptId, amount: receiptAmount, paymentKind: input.paymentKind },
+    ops,
   })
-  if (!posted.success) {
-    await supabase.from("current_account_receipts").delete().eq("id", receiptId)
-    if (checkId) await supabase.from("checks").delete().eq("id", checkId)
-    return { success: false, error: posted.error, status: 400 }
-  }
-
-  const { error: linkErr } = await supabase
-    .from("current_account_receipts")
-    .update({ accounting_entry_id: posted.entryId })
-    .eq("id", receiptId)
-    .eq("pop_id", popId)
-  if (linkErr) {
-    await cancelCurrentAccountAccountingEntry(supabase, posted.entryId)
-    await supabase.from("current_account_receipts").delete().eq("id", receiptId)
-    if (checkId) await supabase.from("checks").delete().eq("id", checkId)
-    return {
-      success: false,
-      error: linkErr.message || "No se pudo vincular el asiento al recibo.",
-      status: 500,
-    }
-  }
-
-  if (checkId) {
-    await supabase
-      .from("checks")
-      .update({ received_accounting_entry_id: posted.entryId })
-      .eq("id", checkId)
-      .eq("pop_id", popId)
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
 
   return { success: true }

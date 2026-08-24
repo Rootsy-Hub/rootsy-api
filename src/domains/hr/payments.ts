@@ -1,8 +1,11 @@
+import { randomUUID } from "node:crypto"
 import type { SupabaseClient } from "@supabase/supabase-js"
+import { applyWithAudit } from "../../audit/apply.js"
+import type { MutationAuditCtx } from "../../audit/types.js"
 import { loadExpensePaymentContext } from "../expenses/paymentContext.js"
 import { roundMoney } from "../reports/money.js"
 import { resolveTreasuryAccountLedgerAccountId } from "../treasury/chart.js"
-import { postBalancedEntry } from "../treasury/ledger.js"
+import { buildBalancedEntryOps } from "../treasury/ledger.js"
 import type { RecordEmployeePaymentBody } from "./schema.js"
 
 const SALARY_EXPENSE_CODES = ["6.1.1.03"] as const
@@ -41,6 +44,7 @@ export async function recordEmployeePayment(
   userId: string,
   employeeId: string,
   input: RecordEmployeePaymentBody,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const amount = roundMoney(input.amount)
   if (!(amount > 0)) {
@@ -100,31 +104,8 @@ export async function recordEmployeePayment(
     ? `Sueldo — ${name} — ${notes}`
     : `Sueldo — ${name}`
 
-  const { data: payIns, error: payErr } = await supabase
-    .from("pop_employee_payments")
-    .insert({
-      pop_id: popId,
-      employee_id: employeeId,
-      amount,
-      paid_at: input.paidAt,
-      payment_kind: input.paymentKind,
-      treasury_account_id: input.treasuryAccountId,
-      notes: notes || null,
-      created_by: userId,
-    })
-    .select("id")
-    .single()
-
-  if (payErr || !payIns?.id) {
-    return {
-      success: false,
-      error: payErr?.message || "No se pudo registrar el pago.",
-      status: 500,
-    }
-  }
-
-  const paymentId = String(payIns.id)
-  const ledger = await postBalancedEntry(supabase, {
+  const paymentId = randomUUID()
+  const ledger = await buildBalancedEntryOps(supabase, {
     popId,
     userId,
     entryDate: input.paidAt,
@@ -150,26 +131,38 @@ export async function recordEmployeePayment(
   })
 
   if (!ledger.success) {
-    await supabase
-      .from("pop_employee_payments")
-      .delete()
-      .eq("id", paymentId)
-      .eq("pop_id", popId)
     return { success: false, error: ledger.error, status: 400 }
   }
 
-  const { error: linkErr } = await supabase
-    .from("pop_employee_payments")
-    .update({ accounting_entry_id: ledger.entryId })
-    .eq("id", paymentId)
-    .eq("pop_id", popId)
-  if (linkErr) {
-    return {
-      success: false,
-      error:
-        "El pago salió de tesorería, pero no se pudo vincular el asiento. Contactá soporte.",
-      status: 500,
-    }
+  const applied = await applyWithAudit(supabase, {
+    kind: "hr.payment.create",
+    ctx: audit,
+    popId,
+    resourceId: paymentId,
+    previous: null,
+    next: { id: paymentId, employeeId, amount },
+    ops: [
+      {
+        op: "insert",
+        table: "pop_employee_payments",
+        row: {
+          id: paymentId,
+          pop_id: popId,
+          employee_id: employeeId,
+          amount,
+          paid_at: input.paidAt,
+          payment_kind: input.paymentKind,
+          treasury_account_id: input.treasuryAccountId,
+          notes: notes || null,
+          created_by: userId,
+          accounting_entry_id: ledger.entryId,
+        },
+      },
+      ...ledger.ops,
+    ],
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
 
   return { success: true }

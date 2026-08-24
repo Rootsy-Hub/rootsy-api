@@ -1,11 +1,13 @@
+import { randomUUID } from "node:crypto"
 import type { SupabaseClient } from "@supabase/supabase-js"
+import { applyWithAudit } from "../../audit/apply.js"
+import type { AuditOp, MutationAuditCtx } from "../../audit/types.js"
 import {
-  cancelCheckAccountingEntry,
-  postCheckDepositLedger,
-  postCheckReceiveLedger,
-  postCheckRejectLedger,
-  postCheckVoidLedger,
-  reversePaymentsLinkedToCheck,
+  buildCheckDepositLedgerOps,
+  buildCheckLinkedReversalOps,
+  buildCheckReceiveLedgerOps,
+  buildCheckRejectLedgerOps,
+  buildCheckVoidLedgerOps,
 } from "./ledger.js"
 import { isCheckDirection, isCheckStatus, lifecycleBlockedError, parseMoneyInput } from "./parse.js"
 import type {
@@ -100,6 +102,7 @@ export async function createCheck(
   popId: string,
   userId: string,
   input: CreateCheckBody,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const checkNumber = input.checkNumber.trim()
   if (!checkNumber) {
@@ -119,37 +122,9 @@ export async function createCheck(
   }
   const partyName = input.partyName.trim()
   const partyId = input.partyId.trim() || null
+  const checkId = randomUUID()
 
-  const { data, error } = await supabase
-    .from("checks")
-    .insert({
-      pop_id: popId,
-      direction: input.direction,
-      check_number: checkNumber,
-      bank_name: bankName,
-      amount,
-      issue_date: input.issueDate,
-      due_date: input.dueDate,
-      status: "in_portfolio",
-      source_kind: "manual",
-      client_id: input.direction === "received" ? partyId : null,
-      supplier_id: input.direction === "issued" ? partyId : null,
-      drawer_name: input.direction === "received" ? partyName || null : null,
-      payee_name: input.direction === "issued" ? partyName || null : null,
-      notes: input.notes.trim() || null,
-      created_by: userId,
-    })
-    .select("id")
-    .single()
-  if (error || !data?.id) {
-    return {
-      success: false,
-      error: error?.message || "No se pudo crear el cheque.",
-      status: 500,
-    }
-  }
-  const checkId = String(data.id)
-  const posted = await postCheckReceiveLedger(supabase, {
+  const posted = await buildCheckReceiveLedgerOps(supabase, {
     popId,
     userId,
     checkId,
@@ -160,22 +135,40 @@ export async function createCheck(
     bankName,
   })
   if (!posted.success) {
-    await supabase.from("checks").delete().eq("id", checkId).eq("pop_id", popId)
     return { success: false, error: posted.error, status: 400 }
   }
-  const { error: linkErr } = await supabase
-    .from("checks")
-    .update({ received_accounting_entry_id: posted.entryId })
-    .eq("id", checkId)
-    .eq("pop_id", popId)
-  if (linkErr) {
-    await cancelCheckAccountingEntry(supabase, posted.entryId)
-    await supabase.from("checks").delete().eq("id", checkId).eq("pop_id", popId)
-    return {
-      success: false,
-      error: linkErr.message || "No se pudo vincular el asiento al cheque.",
-      status: 500,
-    }
+
+  const row = {
+    id: checkId,
+    pop_id: popId,
+    direction: input.direction,
+    check_number: checkNumber,
+    bank_name: bankName,
+    amount,
+    issue_date: input.issueDate,
+    due_date: input.dueDate,
+    status: "in_portfolio",
+    source_kind: "manual",
+    client_id: input.direction === "received" ? partyId : null,
+    supplier_id: input.direction === "issued" ? partyId : null,
+    drawer_name: input.direction === "received" ? partyName || null : null,
+    payee_name: input.direction === "issued" ? partyName || null : null,
+    notes: input.notes.trim() || null,
+    created_by: userId,
+    received_accounting_entry_id: posted.entryId,
+  }
+
+  const applied = await applyWithAudit(supabase, {
+    kind: "checks.create",
+    ctx: audit,
+    popId,
+    resourceId: checkId,
+    previous: null,
+    next: row,
+    ops: [{ op: "insert", table: "checks", row }, ...posted.ops],
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
   return { success: true }
 }
@@ -186,11 +179,15 @@ export async function depositCheck(
   userId: string,
   checkId: string,
   input: DepositCheckBody,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const loaded = await loadCheckForUpdate(supabase, popId, checkId)
   if (!loaded.ok) return { success: false, error: loaded.error, status: loaded.status }
   const blocked = lifecycleBlockedError(loaded.check.status, "deposit")
   if (blocked) return { success: false, error: blocked, status: 409 }
+  if (loaded.check.status !== "in_portfolio") {
+    return { success: false, error: "El cheque ya no está en cartera.", status: 409 }
+  }
 
   const treasuryAccountId = input.treasuryAccountId.trim()
   if (!treasuryAccountId) {
@@ -213,9 +210,10 @@ export async function depositCheck(
     }
   }
 
+  const ops: AuditOp[] = []
   let settlementEntryId = loaded.check.settlementAccountingEntryId
   if (!settlementEntryId) {
-    const posted = await postCheckDepositLedger(supabase, {
+    const posted = await buildCheckDepositLedgerOps(supabase, {
       popId,
       userId,
       checkId: loaded.check.checkId,
@@ -228,32 +226,33 @@ export async function depositCheck(
     })
     if (!posted.success) return { success: false, error: posted.error, status: 400 }
     settlementEntryId = posted.entryId
+    ops.push(...posted.ops)
   }
 
-  const { data, error } = await supabase
-    .from("checks")
-    .update({
-      status: "deposited",
-      deposit_treasury_account_id: treasuryAccountId,
-      deposited_at: input.depositedAt,
-      settlement_accounting_entry_id: settlementEntryId,
-    })
-    .eq("id", loaded.check.checkId)
-    .eq("pop_id", popId)
-    .eq("status", "in_portfolio")
-    .select("id")
-    .maybeSingle()
-  if (error) {
-    if (!loaded.check.settlementAccountingEntryId && settlementEntryId) {
-      await cancelCheckAccountingEntry(supabase, settlementEntryId)
-    }
-    return { success: false, error: error.message, status: 500 }
+  const patch = {
+    status: "deposited",
+    deposit_treasury_account_id: treasuryAccountId,
+    deposited_at: input.depositedAt,
+    settlement_accounting_entry_id: settlementEntryId,
   }
-  if (!data) {
-    if (!loaded.check.settlementAccountingEntryId && settlementEntryId) {
-      await cancelCheckAccountingEntry(supabase, settlementEntryId)
-    }
-    return { success: false, error: "El cheque ya no está en cartera.", status: 409 }
+  ops.push({
+    op: "update",
+    table: "checks",
+    id: loaded.check.checkId,
+    row: patch,
+  })
+
+  const applied = await applyWithAudit(supabase, {
+    kind: "checks.deposit",
+    ctx: audit,
+    popId,
+    resourceId: loaded.check.checkId,
+    previous: loaded.check,
+    next: { ...loaded.check, ...patch },
+    ops,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
   return { success: true }
 }
@@ -264,12 +263,17 @@ export async function clearCheck(
   userId: string,
   checkId: string,
   input: ClearCheckBody,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const loaded = await loadCheckForUpdate(supabase, popId, checkId)
   if (!loaded.ok) return { success: false, error: loaded.error, status: loaded.status }
   const blocked = lifecycleBlockedError(loaded.check.status, "clear")
   if (blocked) return { success: false, error: blocked, status: 409 }
+  if (loaded.check.status !== "deposited") {
+    return { success: false, error: "El cheque ya no está depositado.", status: 409 }
+  }
 
+  const ops: AuditOp[] = []
   let settlementEntryId = loaded.check.settlementAccountingEntryId
   if (!settlementEntryId) {
     const treasuryAccountId = loaded.check.depositTreasuryAccountId
@@ -280,7 +284,7 @@ export async function clearCheck(
         status: 400,
       }
     }
-    const posted = await postCheckDepositLedger(supabase, {
+    const posted = await buildCheckDepositLedgerOps(supabase, {
       popId,
       userId,
       checkId: loaded.check.checkId,
@@ -293,31 +297,32 @@ export async function clearCheck(
     })
     if (!posted.success) return { success: false, error: posted.error, status: 400 }
     settlementEntryId = posted.entryId
+    ops.push(...posted.ops)
   }
 
-  const { data, error } = await supabase
-    .from("checks")
-    .update({
-      status: "cleared",
-      cleared_at: input.clearedAt,
-      settlement_accounting_entry_id: settlementEntryId,
-    })
-    .eq("id", loaded.check.checkId)
-    .eq("pop_id", popId)
-    .eq("status", "deposited")
-    .select("id")
-    .maybeSingle()
-  if (error) {
-    if (!loaded.check.settlementAccountingEntryId && settlementEntryId) {
-      await cancelCheckAccountingEntry(supabase, settlementEntryId)
-    }
-    return { success: false, error: error.message, status: 500 }
+  const patch = {
+    status: "cleared",
+    cleared_at: input.clearedAt,
+    settlement_accounting_entry_id: settlementEntryId,
   }
-  if (!data) {
-    if (!loaded.check.settlementAccountingEntryId && settlementEntryId) {
-      await cancelCheckAccountingEntry(supabase, settlementEntryId)
-    }
-    return { success: false, error: "El cheque ya no está depositado.", status: 409 }
+  ops.push({
+    op: "update",
+    table: "checks",
+    id: loaded.check.checkId,
+    row: patch,
+  })
+
+  const applied = await applyWithAudit(supabase, {
+    kind: "checks.clear",
+    ctx: audit,
+    popId,
+    resourceId: loaded.check.checkId,
+    previous: loaded.check,
+    next: { ...loaded.check, ...patch },
+    ops,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
   return { success: true }
 }
@@ -328,6 +333,7 @@ export async function rejectCheck(
   userId: string,
   checkId: string,
   input: RejectCheckBody,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const loaded = await loadCheckForUpdate(supabase, popId, checkId)
   if (!loaded.ok) return { success: false, error: loaded.error, status: loaded.status }
@@ -335,7 +341,7 @@ export async function rejectCheck(
   if (blocked) return { success: false, error: blocked, status: 409 }
 
   const settledToBank = Boolean(loaded.check.settlementAccountingEntryId)
-  const posted = await postCheckRejectLedger(supabase, {
+  const posted = await buildCheckRejectLedgerOps(supabase, {
     popId,
     userId,
     checkId: loaded.check.checkId,
@@ -349,33 +355,38 @@ export async function rejectCheck(
   })
   if (!posted.success) return { success: false, error: posted.error, status: 400 }
 
-  const { data, error } = await supabase
-    .from("checks")
-    .update({
-      status: "rejected",
-      rejected_at: input.rejectedAt,
-      rejection_reason: input.reason.trim() || null,
-    })
-    .eq("id", loaded.check.checkId)
-    .eq("pop_id", popId)
-    .in("status", ["in_portfolio", "deposited"])
-    .select("id")
-    .maybeSingle()
-  if (error) {
-    await cancelCheckAccountingEntry(supabase, posted.entryId)
-    return { success: false, error: error.message, status: 500 }
-  }
-  if (!data) {
-    await cancelCheckAccountingEntry(supabase, posted.entryId)
-    return { success: false, error: "El cheque ya no se puede rechazar.", status: 409 }
-  }
-  const reversed = await reversePaymentsLinkedToCheck(
+  const reversal = await buildCheckLinkedReversalOps(
     supabase,
     popId,
     loaded.check.checkId,
   )
-  if (!reversed.success) {
-    return { success: false, error: reversed.error, status: 500 }
+  if (!reversal.success) return { success: false, error: reversal.error, status: 500 }
+
+  const patch = {
+    status: "rejected",
+    rejected_at: input.rejectedAt,
+    rejection_reason: input.reason.trim() || null,
+  }
+  const applied = await applyWithAudit(supabase, {
+    kind: "checks.reject",
+    ctx: audit,
+    popId,
+    resourceId: loaded.check.checkId,
+    previous: loaded.check,
+    next: { ...loaded.check, ...patch },
+    ops: [
+      ...posted.ops,
+      {
+        op: "update",
+        table: "checks",
+        id: loaded.check.checkId,
+        row: patch,
+      },
+      ...reversal.ops,
+    ],
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
   return { success: true }
 }
@@ -386,14 +397,22 @@ export async function voidCheck(
   userId: string,
   siteId: string,
   checkId: string,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const loaded = await loadCheckForUpdate(supabase, popId, checkId)
   if (!loaded.ok) return { success: false, error: loaded.error, status: loaded.status }
   const blocked = lifecycleBlockedError(loaded.check.status, "void")
   if (blocked) return { success: false, error: blocked, status: 409 }
+  if (loaded.check.status !== "in_portfolio") {
+    return {
+      success: false,
+      error: "Solo se puede anular un cheque en cartera.",
+      status: 409,
+    }
+  }
 
   const timeZone = await loadPopTimeZone(supabase, popId, siteId)
-  const posted = await postCheckVoidLedger(supabase, {
+  const posted = await buildCheckVoidLedgerOps(supabase, {
     popId,
     userId,
     checkId: loaded.check.checkId,
@@ -405,33 +424,33 @@ export async function voidCheck(
   })
   if (!posted.success) return { success: false, error: posted.error, status: 400 }
 
-  const { data, error } = await supabase
-    .from("checks")
-    .update({ status: "voided" })
-    .eq("id", loaded.check.checkId)
-    .eq("pop_id", popId)
-    .eq("status", "in_portfolio")
-    .select("id")
-    .maybeSingle()
-  if (error) {
-    await cancelCheckAccountingEntry(supabase, posted.entryId)
-    return { success: false, error: error.message, status: 500 }
-  }
-  if (!data) {
-    await cancelCheckAccountingEntry(supabase, posted.entryId)
-    return {
-      success: false,
-      error: "Solo se puede anular un cheque en cartera.",
-      status: 409,
-    }
-  }
-  const reversed = await reversePaymentsLinkedToCheck(
+  const reversal = await buildCheckLinkedReversalOps(
     supabase,
     popId,
     loaded.check.checkId,
   )
-  if (!reversed.success) {
-    return { success: false, error: reversed.error, status: 500 }
+  if (!reversal.success) return { success: false, error: reversal.error, status: 500 }
+
+  const applied = await applyWithAudit(supabase, {
+    kind: "checks.void",
+    ctx: audit,
+    popId,
+    resourceId: loaded.check.checkId,
+    previous: loaded.check,
+    next: { ...loaded.check, status: "voided" },
+    ops: [
+      ...posted.ops,
+      {
+        op: "update",
+        table: "checks",
+        id: loaded.check.checkId,
+        row: { status: "voided" },
+      },
+      ...reversal.ops,
+    ],
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
   return { success: true }
 }

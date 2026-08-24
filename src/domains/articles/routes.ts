@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import { z } from "zod"
 import type { SidecarEnv } from "../../sidecar/pop.js"
 import { requireAnyPermission } from "../../sidecar/permissions.js"
+import { requireMutationPermission } from "../../sidecar/mutationPermission.js"
 import {
   ARTICLE_CREATE,
   ARTICLE_DELETE,
@@ -11,6 +12,7 @@ import {
 import { uploadArticleImage } from "./image.js"
 import { createArticle, deleteArticle, updateArticle } from "./mutations.js"
 import { getArticle, listArticles } from "./queries.js"
+import { parsePatchBody } from "../../lib/patchBody.js"
 import {
   deleteArticleBodySchema,
   listArticlesQuerySchema,
@@ -66,7 +68,7 @@ articleRoutes.get("/", requireAnyPermission(ARTICLE_READ), async (c) => {
   return c.json(result)
 })
 
-articleRoutes.post("/", requireAnyPermission(ARTICLE_CREATE), async (c) => {
+articleRoutes.post("/", requireMutationPermission(ARTICLE_CREATE), async (c) => {
   const body = upsertArticleBodySchema.safeParse(await c.req.json().catch(() => null))
   if (!body.success) {
     return c.json(
@@ -81,6 +83,7 @@ articleRoutes.post("/", requireAnyPermission(ARTICLE_CREATE), async (c) => {
     sidecar.popSiteId,
     c.get("userId"),
     body.data,
+    c.get("mutationAudit"),
   )
   if (!result.success) return c.json(result, result.status)
   return c.json(result, 201)
@@ -121,20 +124,18 @@ articleRoutes.get("/:articleId", requireAnyPermission(ARTICLE_READ), async (c) =
 
 articleRoutes.patch(
   "/:articleId",
-  requireAnyPermission(ARTICLE_UPDATE),
+  requireMutationPermission(ARTICLE_UPDATE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("articleId"))
     if (!id.success) {
       return c.json({ success: false, error: "articleId inválido" }, 400)
     }
-    const body = upsertArticleBodySchema.safeParse(
+    const body = parsePatchBody(
+      upsertArticleBodySchema,
       await c.req.json().catch(() => null),
     )
     if (!body.success) {
-      return c.json(
-        { success: false, error: body.error.issues[0]?.message ?? "Body inválido" },
-        400,
-      )
+      return c.json({ success: false, error: body.error }, 400)
     }
     const sidecar = c.get("sidecar")
     const result = await updateArticle(
@@ -143,6 +144,7 @@ articleRoutes.patch(
       sidecar.popSiteId,
       id.data,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -151,7 +153,7 @@ articleRoutes.patch(
 
 articleRoutes.delete(
   "/:articleId",
-  requireAnyPermission(ARTICLE_DELETE),
+  requireMutationPermission(ARTICLE_DELETE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("articleId"))
     if (!id.success) {
@@ -171,6 +173,7 @@ articleRoutes.delete(
       c.get("sidecar").popId,
       id.data,
       body.data.confirmationTyped,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)

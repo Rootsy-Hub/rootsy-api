@@ -1,4 +1,8 @@
+import { randomUUID } from "node:crypto"
 import type { SupabaseClient } from "@supabase/supabase-js"
+import { applyWithAudit } from "../../audit/apply.js"
+import { auditedUpdate } from "../../audit/simpleWrite.js"
+import type { AuditOp, MutationAuditCtx } from "../../audit/types.js"
 import {
   EXPENSE_FAMILY_PREFIX,
   isExpenseDefaultChartCode,
@@ -127,6 +131,7 @@ export async function createExpenseCategory(
     kind: "fijo" | "variable"
     family: ExpenseFamily
   },
+  audit: MutationAuditCtx,
 ): Promise<
   | { success: true; data: ExpenseCategoryRow }
   | { success: false; error: string; status?: 400 }
@@ -163,52 +168,70 @@ export async function createExpenseCategory(
     prefix,
     (existingCodes ?? []).map((row) => String(row.code ?? "")),
   )
-
-  const { data: chart, error: chartErr } = await supabase
-    .from("accounting_chart_of_accounts")
-    .insert({
-      pop_id: popId,
+  const chartId = randomUUID()
+  const categoryId = randomUUID()
+  const now = new Date().toISOString()
+  const sortOrder = sortOrderFromChartCode(prefix, code)
+  const ops: AuditOp[] = [
+    {
+      op: "insert",
+      table: "accounting_chart_of_accounts",
+      row: {
+        id: chartId,
+        pop_id: popId,
+        code,
+        name: input.name,
+        account_type: "gastos",
+        nature: "deudora",
+        level: 4,
+        is_movement_account: true,
+        parent_id: String(parent.id),
+        metadata: { user_created: true, expense_category: true },
+      },
+    },
+    {
+      op: "insert",
+      table: "expense_categories",
+      row: {
+        id: categoryId,
+        pop_id: popId,
+        name: input.name,
+        kind: input.kind,
+        sort_order: sortOrder,
+        accounting_chart_account_id: chartId,
+      },
+    },
+  ]
+  const nextRow: ExpenseCategoryDbRow = {
+    id: categoryId,
+    pop_id: popId,
+    name: input.name,
+    kind: input.kind,
+    sort_order: sortOrder,
+    deleted_at: null,
+    created_at: now,
+    accounting_chart_account_id: chartId,
+    accounting_chart_of_accounts: {
       code,
-      name: input.name,
-      account_type: "gastos",
-      nature: "deudora",
-      level: 4,
-      is_movement_account: true,
-      parent_id: String(parent.id),
-      metadata: { user_created: true, expense_category: true },
-    })
-    .select("id")
-    .single()
-
-  if (chartErr || !chart?.id) {
-    return {
-      success: false,
-      error: chartErr?.message || "No se pudo crear la cuenta contable.",
-    }
+      metadata: { user_created: true },
+    },
+  }
+  const applied = await applyWithAudit(supabase, {
+    kind: "expense-categories.create",
+    ctx: audit,
+    popId,
+    resourceId: categoryId,
+    previous: null,
+    next: nextRow,
+    ops,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error || "No se pudo crear." }
   }
 
-  const { data, error } = await supabase
-    .from("expense_categories")
-    .insert({
-      pop_id: popId,
-      name: input.name,
-      kind: input.kind,
-      sort_order: sortOrderFromChartCode(prefix, code),
-      accounting_chart_account_id: String(chart.id),
-    })
-    .select(SELECT)
-    .single()
-
-  if (error || !data) {
-    await supabase
-      .from("accounting_chart_of_accounts")
-      .delete()
-      .eq("id", String(chart.id))
-      .eq("pop_id", popId)
-    return { success: false, error: error?.message || "No se pudo crear." }
-  }
-
-  return { success: true, data: mapRow(data as ExpenseCategoryDbRow) }
+  const fetched = await getExpenseCategory(supabase, popId, categoryId)
+  if (fetched.success) return fetched
+  return { success: true, data: mapRow(nextRow) }
 }
 
 export async function updateExpenseCategory(
@@ -220,45 +243,69 @@ export async function updateExpenseCategory(
     kind?: "fijo" | "variable"
     sortOrder?: number
   },
+  audit: MutationAuditCtx,
 ): Promise<
   | { success: true; data: ExpenseCategoryRow }
   | { success: false; error: string; status: 404 | 500 }
 > {
+  const existing = await getExpenseCategory(supabase, popId, categoryId)
+  if (!existing.success) return existing
+  if (existing.data.deletedAt) {
+    return { success: false, error: "Categoría no encontrada", status: 404 }
+  }
+
   const patch: Record<string, unknown> = {}
   if (input.name != null) patch.name = input.name
   if (input.kind != null) patch.kind = input.kind
   if (input.sortOrder != null) patch.sort_order = input.sortOrder
 
-  const { data, error } = await supabase
-    .from("expense_categories")
-    .update(patch)
-    .eq("id", categoryId)
-    .eq("pop_id", popId)
-    .is("deleted_at", null)
-    .select(SELECT)
-    .maybeSingle()
-
-  if (error) return { success: false, error: error.message, status: 500 }
-  if (!data) {
-    return { success: false, error: "Categoría no encontrada", status: 404 }
+  const ops: AuditOp[] = [
+    { op: "update", table: "expense_categories", id: categoryId, row: patch },
+  ]
+  if (input.name != null && existing.data.accountingChartAccountId) {
+    ops.push({
+      op: "update",
+      table: "accounting_chart_of_accounts",
+      id: existing.data.accountingChartAccountId,
+      row: { name: input.name },
+    })
   }
 
-  const mapped = mapRow(data as ExpenseCategoryDbRow)
-  if (input.name != null && mapped.accountingChartAccountId) {
-    await supabase
-      .from("accounting_chart_of_accounts")
-      .update({ name: input.name })
-      .eq("id", mapped.accountingChartAccountId)
-      .eq("pop_id", popId)
+  const applied = await applyWithAudit(supabase, {
+    kind: "expense-categories.patch",
+    ctx: audit,
+    popId,
+    resourceId: categoryId,
+    previous: existing.data,
+    next: { ...existing.data, ...patch },
+    ops,
+  })
+  if (!applied.success) {
+    return {
+      success: false,
+      error: applied.error,
+      status: applied.status === 404 ? 404 : 500,
+    }
   }
 
-  return { success: true, data: mapped }
+  const fetched = await getExpenseCategory(supabase, popId, categoryId)
+  if (fetched.success) return fetched
+  return {
+    success: true,
+    data: {
+      ...existing.data,
+      name: input.name ?? existing.data.name,
+      kind: input.kind ?? existing.data.kind,
+      sortOrder: input.sortOrder ?? existing.data.sortOrder,
+    },
+  }
 }
 
 export async function deleteExpenseCategory(
   supabase: SupabaseClient,
   popId: string,
   categoryId: string,
+  audit: MutationAuditCtx,
 ): Promise<
   { success: true } | { success: false; error: string; status: 404 | 409 | 500 }
 > {
@@ -287,13 +334,23 @@ export async function deleteExpenseCategory(
     }
   }
   if ((count ?? 0) > 0) {
-    const { error: softErr } = await supabase
-      .from("expense_categories")
-      .update({ deleted_at: new Date().toISOString() })
-      .eq("id", categoryId)
-      .eq("pop_id", popId)
-    if (softErr) {
-      return { success: false, error: softErr.message, status: 500 }
+    const deletedAt = new Date().toISOString()
+    const applied = await auditedUpdate(supabase, {
+      kind: "expense-categories.delete",
+      table: "expense_categories",
+      id: categoryId,
+      row: { deleted_at: deletedAt },
+      ctx: audit,
+      popId,
+      previous: existing.data,
+      next: null,
+    })
+    if (!applied.success) {
+      return {
+        success: false,
+        error: applied.error,
+        status: applied.status === 404 ? 404 : 500,
+      }
     }
     return { success: true }
   }
@@ -316,21 +373,27 @@ export async function deleteExpenseCategory(
     }
   }
 
-  const { error } = await supabase
-    .from("expense_categories")
-    .delete()
-    .eq("id", categoryId)
-    .eq("pop_id", popId)
-
-  if (error) return { success: false, error: error.message, status: 500 }
-
+  const ops: AuditOp[] = [
+    { op: "delete", table: "expense_categories", id: categoryId },
+  ]
   if (chartId) {
-    await supabase
-      .from("accounting_chart_of_accounts")
-      .delete()
-      .eq("id", chartId)
-      .eq("pop_id", popId)
+    ops.push({ op: "delete", table: "accounting_chart_of_accounts", id: chartId })
   }
-
+  const applied = await applyWithAudit(supabase, {
+    kind: "expense-categories.delete",
+    ctx: audit,
+    popId,
+    resourceId: categoryId,
+    previous: existing.data,
+    next: null,
+    ops,
+  })
+  if (!applied.success) {
+    return {
+      success: false,
+      error: applied.error,
+      status: applied.status === 404 ? 404 : 500,
+    }
+  }
   return { success: true }
 }

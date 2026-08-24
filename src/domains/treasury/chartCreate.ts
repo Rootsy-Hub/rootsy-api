@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto"
 import type { SupabaseClient } from "@supabase/supabase-js"
 import {
   TREASURY_KIND_PARENT_CHART_CODE,
@@ -35,7 +36,7 @@ export async function createTreasuryChartSubaccountUnderParent(
     accountType: string
     nature: string
   },
-): Promise<{ id: string; code: string } | { error: string }> {
+): Promise<{ id: string; code: string; row: Record<string, unknown> } | { error: string }> {
   const name = accountName.trim()
   if (!name) return { error: "El nombre de la cuenta es obligatorio." }
 
@@ -67,28 +68,20 @@ export async function createTreasuryChartSubaccountUnderParent(
   const newCode = nextChildCode(parentRow.code, codes)
   const level = Math.max(1, (parentRow.level ?? 4) + 1)
 
-  const { data: inserted, error: insErr } = await supabase
-    .from("accounting_chart_of_accounts")
-    .insert({
-      pop_id: popId,
-      parent_id: parentRow.id,
-      code: newCode,
-      name,
-      account_type: options.accountType,
-      nature: options.nature,
-      level,
-      is_movement_account: true,
-      metadata: { user_created: true, treasury_kind: options.treasuryKind },
-    })
-    .select("id, code")
-    .single()
-
-  if (insErr || !inserted?.id) {
-    return {
-      error: insErr?.message || "No se pudo crear la subcuenta contable.",
-    }
+  const id = randomUUID()
+  const row = {
+    id,
+    pop_id: popId,
+    parent_id: parentRow.id,
+    code: newCode,
+    name,
+    account_type: options.accountType,
+    nature: options.nature,
+    level,
+    is_movement_account: true,
+    metadata: { user_created: true, treasury_kind: options.treasuryKind },
   }
-  return { id: String(inserted.id), code: String(inserted.code) }
+  return { id, code: newCode, row }
 }
 
 export async function createTreasuryChartSubaccount(
@@ -96,7 +89,7 @@ export async function createTreasuryChartSubaccount(
   popId: string,
   kind: TreasuryAccountKind,
   accountName: string,
-): Promise<{ id: string; code: string } | { error: string }> {
+): Promise<{ id: string; code: string; row: Record<string, unknown> } | { error: string }> {
   const name = accountName.trim()
   if (!name) return { error: "El nombre de la cuenta es obligatorio." }
 
@@ -135,26 +128,18 @@ export async function createTreasuryChartSubaccount(
   const nature =
     kind === "card_payable" || kind === "check_payable" ? "acreedora" : "deudora"
 
-  const { data: inserted, error: insErr } = await supabase
-    .from("accounting_chart_of_accounts")
-    .insert({
-      pop_id: popId,
-      parent_id: parentRow.id,
-      code: newCode,
-      name,
-      account_type: accountType,
-      nature,
-      level,
-      is_movement_account: true,
-      metadata: { user_created: true, treasury_kind: kind },
-    })
-    .select("id, code")
-    .single()
-
-  if (insErr || !inserted?.id) {
-    return {
-      error: insErr?.message || "No se pudo crear la subcuenta contable.",
-    }
+  const id = randomUUID()
+  const row = {
+    id,
+    pop_id: popId,
+    parent_id: parentRow.id,
+    code: newCode,
+    name,
+    account_type: accountType,
+    nature,
+    level,
+    is_movement_account: true,
+    metadata: { user_created: true, treasury_kind: kind },
   }
-  return { id: String(inserted.id), code: String(inserted.code) }
+  return { id, code: newCode, row }
 }

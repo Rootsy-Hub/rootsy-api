@@ -216,3 +216,4 @@ export const deleteArticleBodySchema = z.object({
 export type CostLineInput = z.infer<typeof costLineSchema>
 export type ListPriceAmountInput = z.infer<typeof listPriceAmountSchema>
 export type UpsertArticleBody = z.infer<typeof upsertArticleBodySchema>
+export type PatchArticleBody = Partial<UpsertArticleBody>

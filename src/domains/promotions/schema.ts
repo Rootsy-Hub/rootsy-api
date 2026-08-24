@@ -110,6 +110,7 @@ export const deletePromotionBodySchema = z.object({
 export type SlotOptionInput = z.infer<typeof slotOptionInputSchema>
 export type SlotInput = z.infer<typeof slotInputSchema>
 export type UpsertPromotionBody = z.infer<typeof upsertPromotionBodySchema>
+export type PatchPromotionBody = Partial<UpsertPromotionBody>
 
 export type PromotionCatalogOption = {
   id: string

@@ -1,4 +1,12 @@
+import { randomUUID } from "node:crypto"
 import type { SupabaseClient } from "@supabase/supabase-js"
+import { applyWithAudit } from "../../audit/apply.js"
+import {
+  auditedDelete,
+  auditedInsert,
+  auditedUpdate,
+} from "../../audit/simpleWrite.js"
+import type { AuditOp, MutationAuditCtx } from "../../audit/types.js"
 import type { CategoryRow } from "./schema.js"
 
 const SELECT =
@@ -104,6 +112,7 @@ export async function createCategory(
     showInMenu?: boolean
     sortOrder?: number
   },
+  audit: MutationAuditCtx,
 ): Promise<
   | { success: true; data: CategoryRow }
   | { success: false; error: string }
@@ -121,24 +130,31 @@ export async function createCategory(
       maxRow?.sort_order != null ? Number(maxRow.sort_order) + 1 : 0
   }
 
-  const { data, error } = await supabase
-    .from("categories")
-    .insert({
-      pop_id: popId,
-      name: input.name,
-      item_kind: input.itemKind,
-      sort_order: sortOrder,
-      visible: input.visible ?? true,
-      show_in_sale: input.showInSale ?? true,
-      show_in_menu: input.showInMenu ?? true,
-    })
-    .select(SELECT)
-    .single()
-
-  if (error || !data) {
-    return { success: false, error: error?.message || "No se pudo crear." }
+  const id = randomUUID()
+  const now = new Date().toISOString()
+  const row: CategoryDbRow = {
+    id,
+    pop_id: popId,
+    name: input.name,
+    item_kind: input.itemKind,
+    sort_order: sortOrder,
+    visible: input.visible ?? true,
+    show_in_sale: input.showInSale ?? true,
+    show_in_menu: input.showInMenu ?? true,
+    created_at: now,
+    updated_at: now,
   }
-  return { success: true, data: mapRow(data as CategoryDbRow) }
+  const applied = await auditedInsert(supabase, {
+    kind: "categories.create",
+    table: "categories",
+    row: { ...row },
+    ctx: audit,
+    popId,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error || "No se pudo crear." }
+  }
+  return { success: true, data: mapRow(row) }
 }
 
 export async function updateCategory(
@@ -153,10 +169,24 @@ export async function updateCategory(
     showInMenu?: boolean
     sortOrder?: number
   },
+  audit: MutationAuditCtx,
 ): Promise<
   | { success: true; data: CategoryRow }
   | { success: false; error: string; status: 404 | 500 }
 > {
+  const { data: current, error: fetchError } = await supabase
+    .from("categories")
+    .select(SELECT)
+    .eq("id", categoryId)
+    .eq("pop_id", popId)
+    .maybeSingle()
+  if (fetchError) {
+    return { success: false, error: fetchError.message, status: 500 }
+  }
+  if (!current) {
+    return { success: false, error: "Categoría no encontrada", status: 404 }
+  }
+
   const patch: Record<string, unknown> = {
     updated_at: new Date().toISOString(),
   }
@@ -167,23 +197,32 @@ export async function updateCategory(
   if (input.showInMenu != null) patch.show_in_menu = input.showInMenu
   if (input.sortOrder != null) patch.sort_order = input.sortOrder
 
-  const { data, error } = await supabase
-    .from("categories")
-    .update(patch)
-    .eq("id", categoryId)
-    .eq("pop_id", popId)
-    .select(SELECT)
-    .maybeSingle()
-
-  if (error) return { success: false, error: error.message, status: 500 }
-  if (!data) return { success: false, error: "Categoría no encontrada", status: 404 }
-  return { success: true, data: mapRow(data as CategoryDbRow) }
+  const next = { ...current, ...patch }
+  const applied = await auditedUpdate(supabase, {
+    kind: "categories.patch",
+    table: "categories",
+    id: categoryId,
+    row: patch,
+    ctx: audit,
+    popId,
+    previous: current,
+    next,
+  })
+  if (!applied.success) {
+    return {
+      success: false,
+      error: applied.error,
+      status: applied.status === 404 ? 404 : 500,
+    }
+  }
+  return { success: true, data: mapRow(next as CategoryDbRow) }
 }
 
 export async function deleteCategory(
   supabase: SupabaseClient,
   popId: string,
   categoryId: string,
+  audit: MutationAuditCtx,
 ): Promise<{ success: true } | { success: false; error: string; status: 404 | 409 | 500 }> {
   const existing = await getCategory(supabase, popId, categoryId)
   if (!existing.success) return existing
@@ -205,13 +244,21 @@ export async function deleteCategory(
     }
   }
 
-  const { error } = await supabase
-    .from("categories")
-    .delete()
-    .eq("id", categoryId)
-    .eq("pop_id", popId)
-
-  if (error) return { success: false, error: error.message, status: 500 }
+  const applied = await auditedDelete(supabase, {
+    kind: "categories.delete",
+    table: "categories",
+    id: categoryId,
+    ctx: audit,
+    popId,
+    previous: existing.data,
+  })
+  if (!applied.success) {
+    return {
+      success: false,
+      error: applied.error,
+      status: applied.status === 404 ? 404 : 500,
+    }
+  }
   return { success: true }
 }
 
@@ -219,11 +266,12 @@ export async function layoutCategories(
   supabase: SupabaseClient,
   popId: string,
   updates: { id: string; sortOrder: number; showInSale: boolean }[],
+  audit: MutationAuditCtx,
 ): Promise<{ success: true } | { success: false; error: string; status: 400 | 500 }> {
   const ids = [...new Set(updates.map((u) => u.id))]
   const { data: validRows, error: validErr } = await supabase
     .from("categories")
-    .select("id")
+    .select("id, sort_order, show_in_sale, show_in_menu")
     .eq("pop_id", popId)
     .in("id", ids)
 
@@ -235,20 +283,36 @@ export async function layoutCategories(
     return { success: false, error: "Ninguna categoría es válida.", status: 400 }
   }
 
-  for (const u of filtered) {
-    const { error } = await supabase
-      .from("categories")
-      .update({
-        sort_order: u.sortOrder,
-        show_in_sale: u.showInSale,
-        // El ojo de Artículos aplica a Vender, Mostrador y Mesas.
-        show_in_menu: u.showInSale,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", u.id)
-      .eq("pop_id", popId)
-    if (error) return { success: false, error: error.message, status: 500 }
+  const now = new Date().toISOString()
+  const ops: AuditOp[] = filtered.map((u) => ({
+    op: "update" as const,
+    table: "categories",
+    id: u.id,
+    row: {
+      sort_order: u.sortOrder,
+      show_in_sale: u.showInSale,
+      show_in_menu: u.showInSale,
+      updated_at: now,
+    },
+  }))
+  const next = filtered.map((u) => ({
+    id: u.id,
+    sort_order: u.sortOrder,
+    show_in_sale: u.showInSale,
+    show_in_menu: u.showInSale,
+    updated_at: now,
+  }))
+  const applied = await applyWithAudit(supabase, {
+    kind: "categories.patch",
+    ctx: audit,
+    popId,
+    resourceId: filtered[0]?.id ?? null,
+    previous: validRows,
+    next,
+    ops,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: 500 }
   }
-
   return { success: true }
 }

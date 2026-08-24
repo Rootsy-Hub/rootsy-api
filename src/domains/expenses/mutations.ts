@@ -1,10 +1,17 @@
+import { randomUUID } from "node:crypto"
 import type { SupabaseClient } from "@supabase/supabase-js"
+import { applyWithAudit } from "../../audit/apply.js"
+import { auditedDelete, auditedInsert } from "../../audit/simpleWrite.js"
+import type { AuditOp, MutationAuditCtx } from "../../audit/types.js"
 import {
   isValidOperationPaymentKind,
   parseCheckoutCheckDetails,
   roundMoney,
 } from "./accounts.js"
-import { postExpensePaymentLedger, postExpenseVoidReversals } from "./ledger.js"
+import {
+  buildExpensePaymentLedgerOps,
+  buildExpenseVoidReversalOps,
+} from "./ledger.js"
 import { expenseDateBelongsToMonth } from "./month.js"
 import type { CreateExpenseBody, RecordExpensePaymentBody } from "./schema.js"
 import { entryDateIsoInTimezone, timezoneForPopLedger } from "./timezone.js"
@@ -38,6 +45,7 @@ export async function createExpense(
   popId: string,
   userId: string,
   input: CreateExpenseBody,
+  audit: MutationAuditCtx,
 ): Promise<CreateResult> {
   const amount = roundMoney(input.amount)
   if (!(amount > 0)) {
@@ -69,28 +77,29 @@ export async function createExpense(
     }
   }
 
-  const { data: ins, error } = await supabase
-    .from("expenses")
-    .insert({
-      pop_id: popId,
-      category_id: input.categoryId.trim(),
-      amount,
-      currency: "ARS",
-      expense_date: input.expenseDate.trim(),
-      due_date: input.dueDate?.trim() || null,
-      description: (input.description ?? "").trim(),
-      created_by: userId,
-    })
-    .select("id")
-    .maybeSingle()
-  if (error || !ins) {
-    return {
-      success: false,
-      error: error?.message || "No se pudo crear el gasto.",
-      status: 500,
-    }
+  const id = randomUUID()
+  const row = {
+    id,
+    pop_id: popId,
+    category_id: input.categoryId.trim(),
+    amount,
+    currency: "ARS",
+    expense_date: input.expenseDate.trim(),
+    due_date: input.dueDate?.trim() || null,
+    description: (input.description ?? "").trim(),
+    created_by: userId,
   }
-  return { success: true, data: { id: String(ins.id) } }
+  const applied = await auditedInsert(supabase, {
+    kind: "expenses.create",
+    table: "expenses",
+    row,
+    ctx: audit,
+    popId,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
+  }
+  return { success: true, data: { id } }
 }
 
 export async function recordExpensePayment(
@@ -99,6 +108,7 @@ export async function recordExpensePayment(
   userId: string,
   expenseId: string,
   input: RecordExpensePaymentBody,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const amt = roundMoney(input.amount)
   if (!(amt > 0)) {
@@ -153,11 +163,16 @@ export async function recordExpensePayment(
     }
   }
 
+  const paymentId = randomUUID()
+  const ops: AuditOp[] = []
   let checkId: string | null = null
   if (kind === "check" && parsedCheck) {
-    const { data, error } = await supabase
-      .from("checks")
-      .insert({
+    checkId = randomUUID()
+    ops.push({
+      op: "insert",
+      table: "checks",
+      row: {
+        id: checkId,
         pop_id: popId,
         direction: "issued",
         check_number: parsedCheck.checkNumber,
@@ -174,22 +189,29 @@ export async function recordExpensePayment(
         payee_name: parsedCheck.partyName || null,
         notes: parsedCheck.notes || null,
         created_by: userId,
-      })
-      .select("id")
-      .single()
-    if (error || !data?.id) {
-      return {
-        success: false,
-        error: error?.message || "No se pudo registrar el cheque.",
-        status: 500,
-      }
-    }
-    checkId = String(data.id)
+      },
+    })
   }
 
-  const { data: payIns, error } = await supabase
-    .from("expense_payments")
-    .insert({
+  const ledger = await buildExpensePaymentLedgerOps(supabase, {
+    popId,
+    userId,
+    expensePaymentId: paymentId,
+    expenseId: expenseId.trim(),
+    amount: amt,
+    paidAt: input.paidAt.trim(),
+    paymentKind: kind,
+    treasuryAccountId: taId,
+  })
+  if (!ledger.success) {
+    return { success: false, error: ledger.error, status: 400 }
+  }
+
+  ops.push({
+    op: "insert",
+    table: "expense_payments",
+    row: {
+      id: paymentId,
       pop_id: popId,
       expense_id: expenseId.trim(),
       amount: amt,
@@ -198,28 +220,22 @@ export async function recordExpensePayment(
       treasury_account_id: taId,
       created_by: userId,
       check_id: checkId,
-    })
-    .select("id")
-    .maybeSingle()
-  if (error || !payIns?.id) {
-    if (checkId) await supabase.from("checks").delete().eq("id", checkId)
-    return {
-      success: false,
-      error: error?.message || "No se pudo registrar el pago.",
-      status: 500,
-    }
-  }
-
-  const paymentId = String(payIns.id)
-  const ledger = await postExpensePaymentLedger(supabase, {
-    popId,
-    userId,
-    expensePaymentId: paymentId,
+      accounting_entry_id: ledger.entryId,
+    },
   })
-  if (!ledger.success) {
-    await supabase.from("expense_payments").delete().eq("id", paymentId).eq("pop_id", popId)
-    if (checkId) await supabase.from("checks").delete().eq("id", checkId)
-    return { success: false, error: ledger.error, status: 400 }
+  ops.push(...ledger.ops)
+
+  const applied = await applyWithAudit(supabase, {
+    kind: "expenses.payment",
+    ctx: audit,
+    popId,
+    resourceId: paymentId,
+    previous: null,
+    next: { paymentId, expenseId, amount: amt },
+    ops,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
   return { success: true }
 }
@@ -228,6 +244,7 @@ export async function deleteExpense(
   supabase: SupabaseClient,
   popId: string,
   expenseId: string,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const { count, error: cErr } = await supabase
     .from("expense_payments")
@@ -248,13 +265,25 @@ export async function deleteExpense(
       status: 409,
     }
   }
-  const { error } = await supabase
+  const { data: existing } = await supabase
     .from("expenses")
-    .delete()
+    .select("id, description, amount")
     .eq("id", expenseId.trim())
     .eq("pop_id", popId)
-  if (error) {
-    return { success: false, error: error.message || "No se pudo eliminar.", status: 500 }
+    .maybeSingle()
+  if (!existing?.id) {
+    return { success: false, error: "No se encontró el gasto.", status: 404 }
+  }
+  const applied = await auditedDelete(supabase, {
+    kind: "expenses.delete",
+    table: "expenses",
+    id: expenseId.trim(),
+    ctx: audit,
+    popId,
+    previous: existing,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
   return { success: true }
 }
@@ -266,6 +295,7 @@ export async function voidExpense(
   userId: string,
   expenseId: string,
   reason: string,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const { data: pop } = await supabase
     .from("pops")
@@ -276,7 +306,20 @@ export async function voidExpense(
   const entryDate = entryDateIsoInTimezone(tz)
   const eid = expenseId.trim()
 
-  const rev = await postExpenseVoidReversals(supabase, {
+  const { data: current } = await supabase
+    .from("expenses")
+    .select("id, status")
+    .eq("id", eid)
+    .eq("pop_id", popId)
+    .maybeSingle()
+  if (!current?.id) {
+    return { success: false, error: "El gasto no existe o ya estaba anulado.", status: 404 }
+  }
+  if (String(current.status ?? "") === "voided") {
+    return { success: true }
+  }
+
+  const rev = await buildExpenseVoidReversalOps(supabase, {
     popId,
     userId,
     expenseId: eid,
@@ -284,37 +327,32 @@ export async function voidExpense(
   })
   if (!rev.success) return { success: false, error: rev.error, status: 400 }
 
-  const { data: upd, error } = await supabase
-    .from("expenses")
-    .update({
-      status: "voided",
-      voided_at: new Date().toISOString(),
-      void_reason: reason.trim() || null,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", eid)
-    .eq("pop_id", popId)
-    .neq("status", "voided")
-    .select("id")
-    .maybeSingle()
-  if (error) {
-    return { success: false, error: error.message || "No se pudo anular.", status: 500 }
-  }
-  if (!upd) {
-    const { data: st } = await supabase
-      .from("expenses")
-      .select("status")
-      .eq("id", eid)
-      .eq("pop_id", popId)
-      .maybeSingle()
-    if (String(st?.status ?? "") === "voided") {
-      return { success: true }
-    }
-    return {
-      success: false,
-      error: "El gasto no existe o ya estaba anulado.",
-      status: 404,
-    }
+  const ops: AuditOp[] = [
+    ...rev.ops,
+    {
+      op: "update",
+      table: "expenses",
+      id: eid,
+      row: {
+        status: "voided",
+        voided_at: new Date().toISOString(),
+        void_reason: reason.trim() || null,
+        updated_at: new Date().toISOString(),
+      },
+    },
+  ]
+
+  const applied = await applyWithAudit(supabase, {
+    kind: "expenses.void",
+    ctx: audit,
+    popId,
+    resourceId: eid,
+    previous: current,
+    next: { status: "voided" },
+    ops,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
   return { success: true }
 }

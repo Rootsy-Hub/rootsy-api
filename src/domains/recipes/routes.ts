@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import { z } from "zod"
 import type { SidecarEnv } from "../../sidecar/pop.js"
 import { requireAnyPermission } from "../../sidecar/permissions.js"
+import { requireMutationPermission } from "../../sidecar/mutationPermission.js"
 import {
   RECIPE_CREATE,
   RECIPE_DELETE,
@@ -16,6 +17,7 @@ import {
   listRecipes,
   searchRecipeIngredients,
 } from "./queries.js"
+import { parsePatchBody } from "../../lib/patchBody.js"
 import {
   deleteRecipeBodySchema,
   listRecipeIngredientsQuerySchema,
@@ -62,7 +64,7 @@ recipeRoutes.get("/", requireAnyPermission(RECIPE_READ), async (c) => {
   return c.json(result)
 })
 
-recipeRoutes.post("/", requireAnyPermission(RECIPE_CREATE), async (c) => {
+recipeRoutes.post("/", requireMutationPermission(RECIPE_CREATE), async (c) => {
   const body = upsertRecipeBodySchema.safeParse(await c.req.json().catch(() => null))
   if (!body.success) {
     return c.json(
@@ -74,6 +76,7 @@ recipeRoutes.post("/", requireAnyPermission(RECIPE_CREATE), async (c) => {
     c.get("supabase"),
     c.get("sidecar").popId,
     body.data,
+    c.get("mutationAudit"),
   )
   if (!result.success) return c.json(result, result.status)
   return c.json(result, 201)
@@ -154,26 +157,25 @@ recipeRoutes.get("/:recipeId", requireAnyPermission(RECIPE_READ), async (c) => {
 
 recipeRoutes.patch(
   "/:recipeId",
-  requireAnyPermission(RECIPE_UPDATE),
+  requireMutationPermission(RECIPE_UPDATE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("recipeId"))
     if (!id.success) {
       return c.json({ success: false, error: "recipeId inválido" }, 400)
     }
-    const body = upsertRecipeBodySchema.safeParse(
+    const body = parsePatchBody(
+      upsertRecipeBodySchema,
       await c.req.json().catch(() => null),
     )
     if (!body.success) {
-      return c.json(
-        { success: false, error: body.error.issues[0]?.message ?? "Body inválido" },
-        400,
-      )
+      return c.json({ success: false, error: body.error }, 400)
     }
     const result = await updateRecipe(
       c.get("supabase"),
       c.get("sidecar").popId,
       id.data,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -182,7 +184,7 @@ recipeRoutes.patch(
 
 recipeRoutes.delete(
   "/:recipeId",
-  requireAnyPermission(RECIPE_DELETE),
+  requireMutationPermission(RECIPE_DELETE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("recipeId"))
     if (!id.success) {
@@ -202,6 +204,7 @@ recipeRoutes.delete(
       c.get("sidecar").popId,
       id.data,
       body.data.confirmationTyped,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)

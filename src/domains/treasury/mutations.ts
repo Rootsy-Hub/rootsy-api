@@ -1,4 +1,11 @@
+import { randomUUID } from "node:crypto"
 import type { SupabaseClient } from "@supabase/supabase-js"
+import { applyWithAudit } from "../../audit/apply.js"
+import {
+  auditedDelete,
+  auditedUpdate,
+} from "../../audit/simpleWrite.js"
+import type { MutationAuditCtx } from "../../audit/types.js"
 import { isMotherRow, loadAllTreasuryAccounts } from "./accounts.js"
 import {
   createTreasuryChartSubaccount,
@@ -27,6 +34,7 @@ export async function createTreasuryAccount(
   supabase: SupabaseClient,
   popId: string,
   input: CreateTreasuryAccountBody,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const chart = await createTreasuryChartSubaccount(
     supabase,
@@ -38,22 +46,35 @@ export async function createTreasuryAccount(
     return { success: false, error: chart.error, status: 400 }
   }
 
-  const { error } = await supabase.from("treasury_accounts").insert({
-    pop_id: popId,
-    name: input.name,
-    kind: input.kind,
-    brand_key: input.brandKey?.trim() || null,
-    accounting_chart_account_id: chart.id,
-    is_system_default: false,
-    is_active: true,
-    sort_order: input.sortOrder,
+  const accountId = randomUUID()
+  const applied = await applyWithAudit(supabase, {
+    kind: "treasury.account.create",
+    ctx: audit,
+    popId,
+    resourceId: accountId,
+    previous: null,
+    next: { id: accountId, name: input.name, kind: input.kind },
+    ops: [
+      { op: "insert", table: "accounting_chart_of_accounts", row: chart.row },
+      {
+        op: "insert",
+        table: "treasury_accounts",
+        row: {
+          id: accountId,
+          pop_id: popId,
+          name: input.name,
+          kind: input.kind,
+          brand_key: input.brandKey?.trim() || null,
+          accounting_chart_account_id: chart.id,
+          is_system_default: false,
+          is_active: true,
+          sort_order: input.sortOrder,
+        },
+      },
+    ],
   })
-  if (error) {
-    return {
-      success: false,
-      error: error.message || "No se pudo crear.",
-      status: 500,
-    }
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
   return { success: true }
 }
@@ -63,6 +84,7 @@ export async function createTreasuryChildAccount(
   popId: string,
   parentTreasuryAccountId: string,
   input: CreateTreasuryChildBody,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const { data: parent, error: parentErr } = await supabase
     .from("treasury_accounts")
@@ -178,22 +200,35 @@ export async function createTreasuryChildAccount(
   }
 
   const parentSort = Number(parent.sort_order ?? 0)
-  const { error } = await supabase.from("treasury_accounts").insert({
-    pop_id: popId,
-    name: input.name,
-    kind: chartConfig.kind,
-    accounting_chart_account_id: chart.id,
-    parent_treasury_account_id: parentTreasuryAccountId,
-    is_system_default: false,
-    is_active: true,
-    sort_order: Math.trunc(parentSort + (input.kind === "pos" ? 1 : 2)),
+  const accountId = randomUUID()
+  const applied = await applyWithAudit(supabase, {
+    kind: "treasury.child.create",
+    ctx: audit,
+    popId,
+    resourceId: accountId,
+    previous: null,
+    next: { id: accountId, name: input.name, kind: chartConfig.kind },
+    ops: [
+      { op: "insert", table: "accounting_chart_of_accounts", row: chart.row },
+      {
+        op: "insert",
+        table: "treasury_accounts",
+        row: {
+          id: accountId,
+          pop_id: popId,
+          name: input.name,
+          kind: chartConfig.kind,
+          accounting_chart_account_id: chart.id,
+          parent_treasury_account_id: parentTreasuryAccountId,
+          is_system_default: false,
+          is_active: true,
+          sort_order: Math.trunc(parentSort + (input.kind === "pos" ? 1 : 2)),
+        },
+      },
+    ],
   })
-  if (error) {
-    return {
-      success: false,
-      error: error.message || "No se pudo crear.",
-      status: 500,
-    }
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
   return { success: true }
 }
@@ -203,10 +238,11 @@ export async function updateTreasuryAccount(
   popId: string,
   accountId: string,
   input: UpdateTreasuryAccountBody,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const { data: existing } = await supabase
     .from("treasury_accounts")
-    .select("id, accounting_chart_account_id")
+    .select("id, name, accounting_chart_account_id")
     .eq("id", accountId)
     .eq("pop_id", popId)
     .maybeSingle()
@@ -214,25 +250,35 @@ export async function updateTreasuryAccount(
     return { success: false, error: "Cuenta no encontrada.", status: 404 }
   }
 
-  const { error: taErr } = await supabase
-    .from("treasury_accounts")
-    .update({ name: input.name })
-    .eq("id", accountId)
-    .eq("pop_id", popId)
-  if (taErr) {
-    return {
-      success: false,
-      error: taErr.message || "No se pudo guardar.",
-      status: 500,
-    }
+  const ops = [
+    {
+      op: "update" as const,
+      table: "treasury_accounts",
+      id: accountId,
+      row: { name: input.name },
+    },
+  ]
+  if (existing.accounting_chart_account_id) {
+    ops.push({
+      op: "update",
+      table: "accounting_chart_of_accounts",
+      id: String(existing.accounting_chart_account_id),
+      row: { name: input.name },
+    })
   }
 
-  await supabase
-    .from("accounting_chart_of_accounts")
-    .update({ name: input.name })
-    .eq("id", String(existing.accounting_chart_account_id))
-    .eq("pop_id", popId)
-
+  const applied = await applyWithAudit(supabase, {
+    kind: "treasury.account.patch",
+    ctx: audit,
+    popId,
+    resourceId: accountId,
+    previous: existing,
+    next: { ...existing, name: input.name },
+    ops,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
+  }
   return { success: true }
 }
 
@@ -241,10 +287,11 @@ export async function setTreasuryAccountActive(
   popId: string,
   accountId: string,
   isActive: boolean,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const { data: existing } = await supabase
     .from("treasury_accounts")
-    .select("id")
+    .select("id, is_active")
     .eq("id", accountId)
     .eq("pop_id", popId)
     .maybeSingle()
@@ -252,17 +299,18 @@ export async function setTreasuryAccountActive(
     return { success: false, error: "Cuenta no encontrada.", status: 404 }
   }
 
-  const { error } = await supabase
-    .from("treasury_accounts")
-    .update({ is_active: isActive })
-    .eq("id", accountId)
-    .eq("pop_id", popId)
-  if (error) {
-    return {
-      success: false,
-      error: error.message || "No se pudo guardar.",
-      status: 500,
-    }
+  const applied = await auditedUpdate(supabase, {
+    kind: "treasury.account.active",
+    table: "treasury_accounts",
+    id: accountId,
+    row: { is_active: isActive },
+    ctx: audit,
+    popId,
+    previous: existing,
+    next: { ...existing, is_active: isActive },
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
   return { success: true }
 }
@@ -271,6 +319,7 @@ export async function deleteTreasuryAccount(
   supabase: SupabaseClient,
   popId: string,
   accountId: string,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const loaded = await loadAllTreasuryAccounts(supabase, popId)
   if (!loaded.success) {
@@ -294,17 +343,16 @@ export async function deleteTreasuryAccount(
     }
   }
 
-  const { error } = await supabase
-    .from("treasury_accounts")
-    .delete()
-    .eq("id", accountId)
-    .eq("pop_id", popId)
-  if (error) {
-    return {
-      success: false,
-      error: error.message || "No se pudo eliminar.",
-      status: 500,
-    }
+  const applied = await auditedDelete(supabase, {
+    kind: "treasury.account.delete",
+    table: "treasury_accounts",
+    id: accountId,
+    ctx: audit,
+    popId,
+    previous: row,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
   return { success: true }
 }

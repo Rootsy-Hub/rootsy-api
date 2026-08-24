@@ -1,4 +1,10 @@
 import type { SupabaseClient } from "@supabase/supabase-js"
+import {
+  nextAccountingEntryNumber,
+  postedAccountingEntryOps,
+  type LedgerLineOp,
+} from "../../audit/ledgerOps.js"
+import type { AuditOp } from "../../audit/types.js"
 import type { CheckDirection } from "./schema.js"
 
 const CHART_CUENTAS_POR_COBRAR_CODES = ["1.1.2.01"] as const
@@ -31,37 +37,16 @@ async function nextEntryNumber(
   supabase: SupabaseClient,
   popId: string,
 ): Promise<number> {
-  const { data: maxRow } = await supabase
-    .from("accounting_entries")
-    .select("entry_number")
-    .eq("pop_id", popId)
-    .order("entry_number", { ascending: false })
-    .limit(1)
-    .maybeSingle()
-  return maxRow?.entry_number != null && Number.isFinite(Number(maxRow.entry_number))
-    ? Number(maxRow.entry_number) + 1
-    : 1
+  return nextAccountingEntryNumber(supabase, popId)
 }
 
-type LedgerLine = {
-  account_id: string
-  debit_amount: number
-  credit_amount: number
-  description: string
-  line_order: number
-}
+type LedgerLine = LedgerLineOp
 
-export async function cancelCheckAccountingEntry(
-  supabase: SupabaseClient,
-  entryId: string,
-): Promise<void> {
-  await supabase
-    .from("accounting_entries")
-    .update({ status: "cancelled", updated_at: new Date().toISOString() })
-    .eq("id", entryId)
-}
+type LedgerBuildResult =
+  | { success: true; entryId: string; ops: AuditOp[] }
+  | { success: false; error: string }
 
-async function postBalancedEntry(
+async function buildBalancedEntryOps(
   supabase: SupabaseClient,
   args: {
     popId: string
@@ -72,7 +57,7 @@ async function postBalancedEntry(
     description: string
     lines: LedgerLine[]
   },
-): Promise<{ success: true; entryId: string } | { success: false; error: string }> {
+): Promise<LedgerBuildResult> {
   const { popId, userId, entryDate, sourceType, sourceId, description, lines } =
     args
 
@@ -91,50 +76,17 @@ async function postBalancedEntry(
   }
 
   const nextNum = await nextEntryNumber(supabase, popId)
-  const { data: entIns, error: entErr } = await supabase
-    .from("accounting_entries")
-    .insert({
-      pop_id: popId,
-      entry_number: nextNum,
-      entry_date: entryDate,
-      source_type: sourceType,
-      source_id: sourceId,
-      description,
-      status: "draft",
-      created_by: userId,
-    })
-    .select("id")
-    .single()
-
-  if (entErr || !entIns?.id) {
-    return { success: false, error: entErr?.message || "No se pudo crear el asiento." }
-  }
-  const entryId = String(entIns.id)
-
-  const { error: linesErr } = await supabase
-    .from("accounting_entry_lines")
-    .insert(lines.map((line) => ({ ...line, entry_id: entryId })))
-
-  if (linesErr) {
-    await cancelCheckAccountingEntry(supabase, entryId)
-    return { success: false, error: linesErr.message || "No se pudieron crear las líneas." }
-  }
-
-  const { error: postErr } = await supabase
-    .from("accounting_entries")
-    .update({
-      status: "posted",
-      posted_at: new Date().toISOString(),
-      posted_by: userId,
-    })
-    .eq("id", entryId)
-
-  if (postErr) {
-    await cancelCheckAccountingEntry(supabase, entryId)
-    return { success: false, error: postErr.message || "No se pudo registrar el asiento." }
-  }
-
-  return { success: true, entryId }
+  const ledger = postedAccountingEntryOps({
+    popId,
+    userId,
+    entryNumber: nextNum,
+    entryDate,
+    sourceType,
+    sourceId,
+    description,
+    lines,
+  })
+  return { success: true, entryId: ledger.entryId, ops: ledger.ops }
 }
 
 async function resolveCheckTreasuryAccountId(
@@ -231,10 +183,10 @@ type LedgerArgs = {
   bankName: string
 }
 
-export async function postCheckReceiveLedger(
+export async function buildCheckReceiveLedgerOps(
   supabase: SupabaseClient,
   args: LedgerArgs,
-): Promise<{ success: true; entryId: string } | { success: false; error: string }> {
+): Promise<LedgerBuildResult> {
   const amount = roundMoney(args.amount)
   if (!(amount > 0)) {
     return { success: false, error: "Importe de cheque inválido." }
@@ -297,7 +249,7 @@ export async function postCheckReceiveLedger(
           },
         ]
 
-  return postBalancedEntry(supabase, {
+  return buildBalancedEntryOps(supabase, {
     popId: args.popId,
     userId: args.userId,
     entryDate: args.entryDate,
@@ -308,10 +260,10 @@ export async function postCheckReceiveLedger(
   })
 }
 
-export async function postCheckDepositLedger(
+export async function buildCheckDepositLedgerOps(
   supabase: SupabaseClient,
   args: LedgerArgs & { treasuryAccountId: string },
-): Promise<{ success: true; entryId: string } | { success: false; error: string }> {
+): Promise<LedgerBuildResult> {
   const amount = roundMoney(args.amount)
   if (!(amount > 0)) {
     return { success: false, error: "Importe de cheque inválido." }
@@ -385,7 +337,7 @@ export async function postCheckDepositLedger(
           },
         ]
 
-  return postBalancedEntry(supabase, {
+  return buildBalancedEntryOps(supabase, {
     popId: args.popId,
     userId: args.userId,
     entryDate: args.entryDate,
@@ -396,13 +348,13 @@ export async function postCheckDepositLedger(
   })
 }
 
-export async function postCheckRejectLedger(
+export async function buildCheckRejectLedgerOps(
   supabase: SupabaseClient,
   args: LedgerArgs & {
     settledToBank: boolean
     treasuryAccountId?: string | null
   },
-): Promise<{ success: true; entryId: string } | { success: false; error: string }> {
+): Promise<LedgerBuildResult> {
   const amount = roundMoney(args.amount)
   if (!(amount > 0)) {
     return { success: false, error: "Importe de cheque inválido." }
@@ -497,7 +449,7 @@ export async function postCheckRejectLedger(
           },
         ]
 
-  return postBalancedEntry(supabase, {
+  return buildBalancedEntryOps(supabase, {
     popId: args.popId,
     userId: args.userId,
     entryDate: args.entryDate,
@@ -508,10 +460,10 @@ export async function postCheckRejectLedger(
   })
 }
 
-export async function postCheckVoidLedger(
+export async function buildCheckVoidLedgerOps(
   supabase: SupabaseClient,
   args: LedgerArgs,
-): Promise<{ success: true; entryId: string } | { success: false; error: string }> {
+): Promise<LedgerBuildResult> {
   const amount = roundMoney(args.amount)
   if (!(amount > 0)) {
     return { success: false, error: "Importe de cheque inválido." }
@@ -574,7 +526,7 @@ export async function postCheckVoidLedger(
           },
         ]
 
-  return postBalancedEntry(supabase, {
+  return buildBalancedEntryOps(supabase, {
     popId: args.popId,
     userId: args.userId,
     entryDate: args.entryDate,
@@ -585,23 +537,25 @@ export async function postCheckVoidLedger(
   })
 }
 
-const PAYMENT_TABLES = [
+const LINKED_PAYMENT_TABLES = [
+  "expense_payments",
   "sale_payments",
   "purchase_payments",
-  "expense_payments",
   "service_charge_payments",
 ] as const
 
-export async function reversePaymentsLinkedToCheck(
+export async function buildCheckLinkedReversalOps(
   supabase: SupabaseClient,
   popId: string,
   checkId: string,
-): Promise<{ success: true } | { success: false; error: string }> {
+): Promise<{ success: true; ops: AuditOp[] } | { success: false; error: string }> {
   const reversedAt = new Date().toISOString()
-  for (const table of PAYMENT_TABLES) {
-    const { error } = await supabase
+  const ops: AuditOp[] = []
+
+  for (const table of LINKED_PAYMENT_TABLES) {
+    const { data: rows, error } = await supabase
       .from(table)
-      .update({ reversed_at: reversedAt })
+      .select("id")
       .eq("pop_id", popId)
       .eq("check_id", checkId)
       .is("reversed_at", null)
@@ -611,21 +565,35 @@ export async function reversePaymentsLinkedToCheck(
         error: error.message || "No se pudo reabrir el comprobante del cheque.",
       }
     }
-  }
-
-  const { error: receiptErr } = await supabase
-    .from("current_account_receipts")
-    .delete()
-    .eq("pop_id", popId)
-    .eq("check_id", checkId)
-  if (receiptErr) {
-    return {
-      success: false,
-      error:
-        receiptErr.message ||
-        "No se pudo reabrir el comprobante de cuenta corriente.",
+    for (const row of rows ?? []) {
+      ops.push({
+        op: "update",
+        table,
+        id: String(row.id),
+        row: { reversed_at: reversedAt },
+      })
     }
   }
 
-  return { success: true }
+  const { data: receipts, error: recErr } = await supabase
+    .from("current_account_receipts")
+    .select("id")
+    .eq("pop_id", popId)
+    .eq("check_id", checkId)
+  if (recErr) {
+    return {
+      success: false,
+      error:
+        recErr.message ||
+        "No se pudo reabrir el comprobante de cuenta corriente.",
+    }
+  }
+  for (const row of receipts ?? []) {
+    ops.push({
+      op: "delete",
+      table: "current_account_receipts",
+      id: String(row.id),
+    })
+  }
+  return { success: true, ops }
 }

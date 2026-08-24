@@ -11,7 +11,7 @@ export async function getRoleEditor(
   | {
       success: true
       data: {
-        role: { id: string; displayName: string; name: string }
+        role: { id: string; displayName: string; name: string; canApprove: boolean }
         selectedGrantKeys: string[]
       }
     }
@@ -19,7 +19,7 @@ export async function getRoleEditor(
 > {
   const { data: roleRow, error: roleErr } = await supabase
     .from("roles")
-    .select("id, name, display_name, pop_id, permission_grants")
+    .select("id, name, display_name, pop_id, permission_grants, can_approve")
     .eq("id", roleId)
     .single()
 
@@ -47,6 +47,7 @@ export async function getRoleEditor(
         id: String(roleRow.id),
         displayName: String(roleRow.display_name ?? ""),
         name: String(roleRow.name ?? ""),
+        canApprove: roleRow.can_approve === true,
       },
       selectedGrantKeys,
     },
@@ -58,6 +59,7 @@ export async function saveRolePermissions(
   popId: string,
   roleId: string,
   grantKeys: string[],
+  canApprove: boolean,
 ): Promise<
   { success: true } | { success: false; error: string; status: 400 | 500 }
 > {
@@ -66,6 +68,7 @@ export async function saveRolePermissions(
     p_pop_id: popId,
     p_role_id: roleId,
     p_permission_grants: keys,
+    p_can_approve: canApprove,
   })
 
   if (error) return { success: false, error: error.message, status: 500 }
@@ -81,6 +84,7 @@ export async function createRole(
   popId: string,
   displayName: string,
   grantKeys: string[],
+  canApprove: boolean,
 ): Promise<
   | { success: true; roleId: string }
   | { success: false; error: string; status: 400 | 500 }
@@ -90,6 +94,7 @@ export async function createRole(
     p_pop_id: popId,
     p_display_name: displayName.trim(),
     p_permission_grants: keys,
+    p_can_approve: canApprove,
   })
 
   if (error) return { success: false, error: error.message, status: 500 }

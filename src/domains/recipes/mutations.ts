@@ -1,9 +1,19 @@
+import { randomUUID } from "node:crypto"
 import type { SupabaseClient } from "@supabase/supabase-js"
+import { applyWithAudit } from "../../audit/apply.js"
+import {
+  auditedDelete,
+} from "../../audit/simpleWrite.js"
+import type { AuditOp, MutationAuditCtx } from "../../audit/types.js"
 import { resolveArticleReferenceUnitCostsByArticleId } from "./articleReferenceCost.js"
 import { computeRecipeCostPrice } from "./recipeCost.js"
+import { mergePatch } from "../../lib/patchBody.js"
+import { getRecipe } from "./queries.js"
 import type {
   IngredientInput,
   ListPriceAmountInput,
+  PatchRecipeBody,
+  RecipeDetail,
   UpsertRecipeBody,
 } from "./schema.js"
 
@@ -187,93 +197,95 @@ async function loadIngredientArticles(
   return { ok: true, rows }
 }
 
-async function syncRecipeIngredients(
-  supabase: SupabaseClient,
+function ingredientReplaceOps(
   popId: string,
   recipeId: string,
   ingredients: IngredientInput[],
-): Promise<{ ok: true } | { ok: false; error: string }> {
-  const { error: delErr } = await supabase
-    .from("recipe_ingredients")
-    .delete()
-    .eq("recipe_id", recipeId)
-    .eq("pop_id", popId)
-  if (delErr) {
-    return {
-      ok: false,
-      error: delErr.message || "No se pudieron actualizar ingredientes.",
-    }
+  existingIds: string[],
+): AuditOp[] {
+  const ops: AuditOp[] = existingIds.map((id) => ({
+    op: "delete",
+    table: "recipe_ingredients",
+    id,
+  }))
+  for (const [index, line] of ingredients.entries()) {
+    ops.push({
+      op: "insert",
+      table: "recipe_ingredients",
+      row: {
+        id: randomUUID(),
+        recipe_id: recipeId,
+        pop_id: popId,
+        article_id: line.articleId.trim(),
+        quantity: parseQty(line.quantity),
+        waste_pct: line.wastePct == null ? null : parseOptionalPct(line.wastePct),
+        sort_order: index,
+      },
+    })
   }
-  if (ingredients.length === 0) return { ok: true }
-
-  const { error: insErr } = await supabase.from("recipe_ingredients").insert(
-    ingredients.map((line, index) => ({
-      recipe_id: recipeId,
-      pop_id: popId,
-      article_id: line.articleId.trim(),
-      quantity: parseQty(line.quantity),
-      waste_pct: line.wastePct == null ? null : parseOptionalPct(line.wastePct),
-      sort_order: index,
-    })),
-  )
-  if (insErr) {
-    return {
-      ok: false,
-      error: insErr.message || "No se pudieron guardar ingredientes.",
-    }
-  }
-  return { ok: true }
+  return ops
 }
 
-async function syncRecipePriceLists(
+async function buildRecipeListPriceOps(
   supabase: SupabaseClient,
   popId: string,
   recipeId: string,
   inputs: ListPriceAmountInput[],
-): Promise<{ ok: true } | { ok: false; error: string }> {
+): Promise<{ ok: true; ops: AuditOp[] } | { ok: false; error: string }> {
   const { data: extraLists, error: listsError } = await supabase
     .from("price_lists")
     .select("id")
     .eq("pop_id", popId)
     .eq("is_default", false)
   if (listsError) return { ok: false, error: listsError.message }
-
   const extraIds = new Set((extraLists ?? []).map((row) => String(row.id)))
   const wanted = inputs.filter((row) => extraIds.has(row.listId))
-
+  const ops: AuditOp[] = []
   for (const row of wanted) {
+    const { data: existing } = await supabase
+      .from("price_list_items")
+      .select("id")
+      .eq("pop_id", popId)
+      .eq("price_list_id", row.listId)
+      .eq("item_kind", "recipe")
+      .eq("item_id", recipeId)
+      .maybeSingle()
     if (row.amount == null) {
-      const { error } = await supabase
-        .from("price_list_items")
-        .delete()
-        .eq("pop_id", popId)
-        .eq("price_list_id", row.listId)
-        .eq("item_kind", "recipe")
-        .eq("item_id", recipeId)
-      if (error) return { ok: false, error: error.message }
+      if (existing?.id) {
+        ops.push({ op: "delete", table: "price_list_items", id: String(existing.id) })
+      }
       continue
     }
-
-    const { error } = await supabase.from("price_list_items").upsert(
-      {
-        pop_id: popId,
-        price_list_id: row.listId,
-        item_kind: "recipe",
-        item_id: recipeId,
-        amount: row.amount,
-      },
-      { onConflict: "price_list_id,item_kind,item_id" },
-    )
-    if (error) return { ok: false, error: error.message }
+    if (existing?.id) {
+      ops.push({
+        op: "update",
+        table: "price_list_items",
+        id: String(existing.id),
+        row: { amount: row.amount },
+      })
+    } else {
+      ops.push({
+        op: "insert",
+        table: "price_list_items",
+        row: {
+          id: randomUUID(),
+          pop_id: popId,
+          price_list_id: row.listId,
+          item_kind: "recipe",
+          item_id: recipeId,
+          amount: row.amount,
+        },
+      })
+    }
   }
-
-  return { ok: true }
+  return { ok: true, ops }
 }
 
 export async function createRecipe(
   supabase: SupabaseClient,
   popId: string,
   input: UpsertRecipeBody,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const validation = validateRecipeInput(input)
   if (!validation.ok) return { success: false, error: validation.error, status: 400 }
@@ -310,76 +322,91 @@ export async function createRecipe(
   )
 
   const imageUrl = input.imageUrl.trim()
-  const { data: created, error } = await supabase
-    .from("recipes")
-    .insert({
-      pop_id: popId,
-      category_id: input.categoryId.trim(),
-      name: input.name.trim(),
-      description: input.description.trim(),
-      sale_price: roundMoney(Number(input.salePrice)),
-      cost_price: costPrice,
-      iva: Number(input.iva),
-      image_url: imageUrl ? imageUrl : null,
-      is_active: input.isActive,
-      allow_negative_stock: Boolean(input.allowNegativeStock),
-      output_article_id: output.articleId,
-    })
-    .select("id")
-    .single()
-
-  if (error || !created?.id) {
-    return {
-      success: false,
-      error: error?.message || "No se pudo crear la receta.",
-      status: 500,
-    }
+  const recipeId = randomUUID()
+  const recipeRow = {
+    id: recipeId,
+    pop_id: popId,
+    category_id: input.categoryId.trim(),
+    name: input.name.trim(),
+    description: input.description.trim(),
+    sale_price: roundMoney(Number(input.salePrice)),
+    cost_price: costPrice,
+    iva: Number(input.iva),
+    image_url: imageUrl ? imageUrl : null,
+    is_active: input.isActive,
+    allow_negative_stock: Boolean(input.allowNegativeStock),
+    output_article_id: output.articleId,
   }
 
-  const recipeId = String(created.id)
-  const sync = await syncRecipeIngredients(
-    supabase,
-    popId,
-    recipeId,
-    input.ingredients,
-  )
-  if (!sync.ok) {
-    await supabase.from("recipes").delete().eq("id", recipeId).eq("pop_id", popId)
-    return { success: false, error: sync.error, status: 400 }
-  }
+  const ops: AuditOp[] = [{ op: "insert", table: "recipes", row: recipeRow }]
+  ops.push(...ingredientReplaceOps(popId, recipeId, input.ingredients, []))
 
-  const syncLists = await syncRecipePriceLists(
+  const listOps = await buildRecipeListPriceOps(
     supabase,
     popId,
     recipeId,
     input.listPrices ?? [],
   )
-  if (!syncLists.ok) {
-    await supabase.from("recipes").delete().eq("id", recipeId).eq("pop_id", popId)
-    return { success: false, error: syncLists.error, status: 400 }
-  }
+  if (!listOps.ok) return { success: false, error: listOps.error, status: 400 }
+  ops.push(...listOps.ops)
 
+  const applied = await applyWithAudit(supabase, {
+    kind: "recipes.create",
+    ctx: audit,
+    popId,
+    resourceId: recipeId,
+    previous: null,
+    next: recipeRow,
+    ops,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
+  }
   return { success: true, id: recipeId }
+}
+
+function recipeToUpsertBody(row: RecipeDetail): UpsertRecipeBody {
+  return {
+    name: row.name,
+    description: row.description,
+    imageUrl: row.imageUrl ?? "",
+    categoryId: row.categoryId ?? "",
+    salePrice: row.salePrice,
+    iva: row.iva,
+    isActive: row.isActive,
+    allowNegativeStock: row.allowNegativeStock,
+    outputArticleId: row.outputArticleId,
+    ingredients: row.ingredients.map((line) => ({
+      articleId: line.articleId,
+      quantity: line.quantity,
+      wastePct: line.wastePct,
+    })),
+    listPrices: row.listPrices.map((line) => ({
+      listId: line.listId,
+      amount: line.amount,
+    })),
+  }
 }
 
 export async function updateRecipe(
   supabase: SupabaseClient,
   popId: string,
   recipeId: string,
-  input: UpsertRecipeBody,
+  patch: PatchRecipeBody,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
+  const current = await getRecipe(supabase, popId, recipeId)
+  if (!current.success) {
+    return {
+      success: false,
+      error: current.error,
+      status: current.status,
+    }
+  }
+  const input = mergePatch(recipeToUpsertBody(current.data), patch)
+
   const validation = validateRecipeInput(input)
   if (!validation.ok) return { success: false, error: validation.error, status: 400 }
-
-  const { data: existing } = await supabase
-    .from("recipes")
-    .select("id")
-    .eq("id", recipeId)
-    .eq("pop_id", popId)
-    .maybeSingle()
-  if (!existing?.id) {
-    return { success: false, error: "Receta no encontrada.", status: 404 }
-  }
 
   const { data: catRow } = await supabase
     .from("recipe_categories")
@@ -413,43 +440,57 @@ export async function updateRecipe(
   )
 
   const imageUrl = input.imageUrl.trim()
-  const { error } = await supabase
-    .from("recipes")
-    .update({
-      category_id: input.categoryId.trim(),
-      name: input.name.trim(),
-      description: input.description.trim(),
-      sale_price: roundMoney(Number(input.salePrice)),
-      cost_price: costPrice,
-      iva: Number(input.iva),
-      image_url: imageUrl ? imageUrl : null,
-      is_active: input.isActive,
-      allow_negative_stock: Boolean(input.allowNegativeStock),
-      output_article_id: output.articleId,
-    })
-    .eq("id", recipeId)
-    .eq("pop_id", popId)
-
-  if (error) {
-    return { success: false, error: error.message, status: 500 }
+  const updateRow = {
+    category_id: input.categoryId.trim(),
+    name: input.name.trim(),
+    description: input.description.trim(),
+    sale_price: roundMoney(Number(input.salePrice)),
+    cost_price: costPrice,
+    iva: Number(input.iva),
+    image_url: imageUrl ? imageUrl : null,
+    is_active: input.isActive,
+    allow_negative_stock: Boolean(input.allowNegativeStock),
+    output_article_id: output.articleId,
   }
 
-  const sync = await syncRecipeIngredients(
-    supabase,
-    popId,
-    recipeId,
-    input.ingredients,
-  )
-  if (!sync.ok) return { success: false, error: sync.error, status: 400 }
+  const ops: AuditOp[] = [
+    { op: "update", table: "recipes", id: recipeId, row: updateRow },
+  ]
 
-  const syncLists = await syncRecipePriceLists(
-    supabase,
-    popId,
-    recipeId,
-    input.listPrices ?? [],
-  )
-  if (!syncLists.ok) return { success: false, error: syncLists.error, status: 400 }
+  if (patch.ingredients !== undefined) {
+    ops.push(
+      ...ingredientReplaceOps(
+        popId,
+        recipeId,
+        patch.ingredients,
+        current.data.ingredients.map((line) => line.id),
+      ),
+    )
+  }
 
+  if (patch.listPrices !== undefined) {
+    const listOps = await buildRecipeListPriceOps(
+      supabase,
+      popId,
+      recipeId,
+      patch.listPrices,
+    )
+    if (!listOps.ok) return { success: false, error: listOps.error, status: 400 }
+    ops.push(...listOps.ops)
+  }
+
+  const applied = await applyWithAudit(supabase, {
+    kind: "recipes.patch",
+    ctx: audit,
+    popId,
+    resourceId: recipeId,
+    previous: current.data,
+    next: { ...current.data, ...input },
+    ops,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
+  }
   return { success: true }
 }
 
@@ -458,6 +499,7 @@ export async function deleteRecipe(
   popId: string,
   recipeId: string,
   confirmationTyped: string,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const { data: recipe, error: fetchError } = await supabase
     .from("recipes")
@@ -485,11 +527,20 @@ export async function deleteRecipe(
     }
   }
 
-  const { error } = await supabase
-    .from("recipes")
-    .delete()
-    .eq("id", recipeId)
-    .eq("pop_id", popId)
-  if (error) return { success: false, error: error.message, status: 500 }
+  const applied = await auditedDelete(supabase, {
+    kind: "recipes.delete",
+    table: "recipes",
+    id: recipeId,
+    ctx: audit,
+    popId,
+    previous: recipe,
+  })
+  if (!applied.success) {
+    return {
+      success: false,
+      error: applied.error,
+      status: applied.status,
+    }
+  }
   return { success: true }
 }

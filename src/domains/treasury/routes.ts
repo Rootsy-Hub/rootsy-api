@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import { z } from "zod"
 import type { SidecarEnv } from "../../sidecar/pop.js"
 import { requireAnyPermission } from "../../sidecar/permissions.js"
+import { requireMutationPermission } from "../../sidecar/mutationPermission.js"
 import {
   TREASURY_CREATE,
   TREASURY_DELETE,
@@ -133,7 +134,7 @@ treasuryRoutes.get("/", requireAnyPermission(TREASURY_READ), async (c) => {
   return c.json(result)
 })
 
-treasuryRoutes.post("/", requireAnyPermission(TREASURY_CREATE), async (c) => {
+treasuryRoutes.post("/", requireMutationPermission(TREASURY_CREATE), async (c) => {
   const body = createTreasuryAccountBodySchema.safeParse(
     await c.req.json().catch(() => null),
   )
@@ -150,6 +151,7 @@ treasuryRoutes.post("/", requireAnyPermission(TREASURY_CREATE), async (c) => {
     c.get("supabase"),
     c.get("sidecar").popId,
     body.data,
+    c.get("mutationAudit"),
   )
   if (!result.success) return c.json(result, result.status)
   return c.json(result, 201)
@@ -270,7 +272,7 @@ treasuryRoutes.get(
 
 treasuryRoutes.post(
   "/:accountId/statement/import",
-  requireAnyPermission(TREASURY_UPDATE),
+  requireMutationPermission(TREASURY_UPDATE),
   async (c) => {
     const accountId = accountIdSchema.safeParse(c.req.param("accountId"))
     if (!accountId.success) {
@@ -286,6 +288,7 @@ treasuryRoutes.post(
       c.get("userId"),
       accountId.data,
       body.data.csvText,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -294,7 +297,7 @@ treasuryRoutes.post(
 
 treasuryRoutes.post(
   "/:accountId/statement",
-  requireAnyPermission(TREASURY_UPDATE),
+  requireMutationPermission(TREASURY_UPDATE),
   async (c) => {
     const accountId = accountIdSchema.safeParse(c.req.param("accountId"))
     if (!accountId.success) {
@@ -310,6 +313,7 @@ treasuryRoutes.post(
       c.get("userId"),
       accountId.data,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result, 201)
@@ -318,7 +322,7 @@ treasuryRoutes.post(
 
 treasuryRoutes.delete(
   "/:accountId/statement/:lineId",
-  requireAnyPermission(TREASURY_UPDATE),
+  requireMutationPermission(TREASURY_UPDATE),
   async (c) => {
     const accountId = accountIdSchema.safeParse(c.req.param("accountId"))
     const lineId = accountIdSchema.safeParse(c.req.param("lineId"))
@@ -330,6 +334,7 @@ treasuryRoutes.delete(
       c.get("sidecar").popId,
       accountId.data,
       lineId.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -338,7 +343,7 @@ treasuryRoutes.delete(
 
 treasuryRoutes.post(
   "/:accountId/reconciliation-marks",
-  requireAnyPermission(TREASURY_UPDATE),
+  requireMutationPermission(TREASURY_UPDATE),
   async (c) => {
     const accountId = accountIdSchema.safeParse(c.req.param("accountId"))
     if (!accountId.success) {
@@ -354,6 +359,7 @@ treasuryRoutes.post(
       c.get("userId"),
       accountId.data,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -362,7 +368,7 @@ treasuryRoutes.post(
 
 treasuryRoutes.delete(
   "/:accountId/reconciliation-marks",
-  requireAnyPermission(TREASURY_UPDATE),
+  requireMutationPermission(TREASURY_UPDATE),
   async (c) => {
     const body = clearReconciliationMarkBodySchema.safeParse(
       await c.req.json().catch(() => null),
@@ -373,6 +379,7 @@ treasuryRoutes.delete(
       c.get("sidecar").popId,
       body.data.movementKind,
       body.data.movementRefId,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -381,7 +388,7 @@ treasuryRoutes.delete(
 
 treasuryRoutes.post(
   "/:accountId/settlements",
-  requireAnyPermission(TREASURY_UPDATE),
+  requireMutationPermission(TREASURY_UPDATE),
   async (c) => {
     const body = settlementBodySchema.safeParse(
       await c.req.json().catch(() => null),
@@ -392,6 +399,7 @@ treasuryRoutes.post(
       c.get("sidecar").popId,
       c.get("userId"),
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result, 201)
@@ -400,7 +408,7 @@ treasuryRoutes.post(
 
 treasuryRoutes.post(
   "/:accountId/pos-acreditations",
-  requireAnyPermission(TREASURY_UPDATE),
+  requireMutationPermission(TREASURY_UPDATE),
   async (c) => {
     const accountId = accountIdSchema.safeParse(c.req.param("accountId"))
     if (!accountId.success) {
@@ -416,6 +424,7 @@ treasuryRoutes.post(
       c.get("userId"),
       accountId.data,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result, 201)
@@ -442,7 +451,7 @@ treasuryRoutes.get(
 
 treasuryRoutes.patch(
   "/:accountId/active",
-  requireAnyPermission(TREASURY_UPDATE),
+  requireMutationPermission(TREASURY_UPDATE),
   async (c) => {
     const accountId = accountIdSchema.safeParse(c.req.param("accountId"))
     if (!accountId.success) {
@@ -459,6 +468,7 @@ treasuryRoutes.patch(
       c.get("sidecar").popId,
       accountId.data,
       body.data.isActive,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -467,7 +477,7 @@ treasuryRoutes.patch(
 
 treasuryRoutes.patch(
   "/:accountId",
-  requireAnyPermission(TREASURY_UPDATE),
+  requireMutationPermission(TREASURY_UPDATE),
   async (c) => {
     const accountId = accountIdSchema.safeParse(c.req.param("accountId"))
     if (!accountId.success) {
@@ -490,6 +500,7 @@ treasuryRoutes.patch(
       c.get("sidecar").popId,
       accountId.data,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -498,7 +509,7 @@ treasuryRoutes.patch(
 
 treasuryRoutes.post(
   "/:accountId/children",
-  requireAnyPermission(TREASURY_CREATE),
+  requireMutationPermission(TREASURY_CREATE),
   async (c) => {
     const accountId = accountIdSchema.safeParse(c.req.param("accountId"))
     if (!accountId.success) {
@@ -521,6 +532,7 @@ treasuryRoutes.post(
       c.get("sidecar").popId,
       accountId.data,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -529,7 +541,7 @@ treasuryRoutes.post(
 
 treasuryRoutes.delete(
   "/:accountId",
-  requireAnyPermission(TREASURY_DELETE),
+  requireMutationPermission(TREASURY_DELETE),
   async (c) => {
     const accountId = accountIdSchema.safeParse(c.req.param("accountId"))
     if (!accountId.success) {
@@ -539,6 +551,7 @@ treasuryRoutes.delete(
       c.get("supabase"),
       c.get("sidecar").popId,
       accountId.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)

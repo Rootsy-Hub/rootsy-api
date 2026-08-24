@@ -20,7 +20,7 @@ async function readStationPin(
   popId: string,
 ): Promise<
   | { success: true; pin: string | null }
-  | { success: false; error: string; status: 404 | 500 }
+  | { success: false; error: string; status: 400 | 404 | 500 }
 > {
   const { data, error } = await supabase
     .from("pops")
@@ -55,7 +55,7 @@ async function ensureStationPin(
   popId: string,
 ): Promise<
   | { success: true; pin: string }
-  | { success: false; error: string; status: 404 | 500 }
+  | { success: false; error: string; status: 400 | 404 | 500 }
 > {
   const loaded = await readStationPin(supabase, popId)
   if (!loaded.success) return loaded
@@ -73,7 +73,7 @@ export async function getClockStation(
   isOwner: boolean,
 ): Promise<
   | { success: true; data: ClockStationData }
-  | { success: false; error: string; status: 404 | 500 }
+  | { success: false; error: string; status: 400 | 404 | 500 }
 > {
   const canManageStation =
     isOwner || hasAnyPermission(keys, ["hr:create", "hr:update"], false)
@@ -110,7 +110,7 @@ export async function rotateClockStationPin(
   popId: string,
 ): Promise<
   | { success: true; clockStationPin: string }
-  | { success: false; error: string; status: 404 | 500 }
+  | { success: false; error: string; status: 400 | 404 | 500 }
 > {
   const pin = randomStationPin()
   const saved = await writeStationPin(supabase, popId, pin)

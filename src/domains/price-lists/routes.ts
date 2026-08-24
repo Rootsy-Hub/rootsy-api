@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import { z } from "zod"
 import type { SidecarEnv } from "../../sidecar/pop.js"
 import { requireAnyPermission } from "../../sidecar/permissions.js"
+import { requireMutationPermission } from "../../sidecar/mutationPermission.js"
 import {
   PRICE_LIST_CREATE,
   PRICE_LIST_DELETE,
@@ -29,7 +30,7 @@ priceListRoutes.get("/", requireAnyPermission(PRICE_LIST_READ), async (c) => {
   return c.json(result)
 })
 
-priceListRoutes.post("/", requireAnyPermission(PRICE_LIST_CREATE), async (c) => {
+priceListRoutes.post("/", requireMutationPermission(PRICE_LIST_CREATE), async (c) => {
   const body = createPriceListBodySchema.safeParse(
     await c.req.json().catch(() => null),
   )
@@ -43,6 +44,7 @@ priceListRoutes.post("/", requireAnyPermission(PRICE_LIST_CREATE), async (c) => 
     c.get("supabase"),
     c.get("sidecar").popId,
     body.data,
+    c.get("mutationAudit"),
   )
   if (!result.success) return c.json(result, result.status)
   return c.json(result, 201)
@@ -50,7 +52,7 @@ priceListRoutes.post("/", requireAnyPermission(PRICE_LIST_CREATE), async (c) => 
 
 priceListRoutes.patch(
   "/:listId",
-  requireAnyPermission(PRICE_LIST_UPDATE),
+  requireMutationPermission(PRICE_LIST_UPDATE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("listId"))
     if (!id.success) {
@@ -73,6 +75,7 @@ priceListRoutes.patch(
       c.get("sidecar").popId,
       id.data,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -81,7 +84,7 @@ priceListRoutes.patch(
 
 priceListRoutes.delete(
   "/:listId",
-  requireAnyPermission(PRICE_LIST_DELETE),
+  requireMutationPermission(PRICE_LIST_DELETE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("listId"))
     if (!id.success) {
@@ -91,6 +94,7 @@ priceListRoutes.delete(
       c.get("supabase"),
       c.get("sidecar").popId,
       id.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)

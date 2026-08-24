@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import { z } from "zod"
 import type { SidecarEnv } from "../../sidecar/pop.js"
 import { requireAnyPermission } from "../../sidecar/permissions.js"
+import { requireMutationPermission } from "../../sidecar/mutationPermission.js"
 import {
   STATION_CREATE,
   STATION_DELETE,
@@ -35,7 +36,7 @@ comandaStationRoutes.get("/", requireAnyPermission(STATION_READ), async (c) => {
 
 comandaStationRoutes.post(
   "/",
-  requireAnyPermission(STATION_CREATE),
+  requireMutationPermission(STATION_CREATE),
   async (c) => {
     const body = createComandaStationBodySchema.safeParse(
       await c.req.json().catch(() => null),
@@ -53,6 +54,7 @@ comandaStationRoutes.post(
       c.get("supabase"),
       c.get("sidecar").popId,
       body.data.name,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status ?? 500)
     return c.json(result, 201)
@@ -79,7 +81,7 @@ comandaStationRoutes.get(
 
 comandaStationRoutes.patch(
   "/:stationId",
-  requireAnyPermission(STATION_UPDATE),
+  requireMutationPermission(STATION_UPDATE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("stationId"))
     if (!id.success) {
@@ -102,6 +104,7 @@ comandaStationRoutes.patch(
       c.get("sidecar").popId,
       id.data,
       body.data.name,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -110,7 +113,7 @@ comandaStationRoutes.patch(
 
 comandaStationRoutes.delete(
   "/:stationId",
-  requireAnyPermission(STATION_DELETE),
+  requireMutationPermission(STATION_DELETE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("stationId"))
     if (!id.success) {
@@ -120,6 +123,7 @@ comandaStationRoutes.delete(
       c.get("supabase"),
       c.get("sidecar").popId,
       id.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)

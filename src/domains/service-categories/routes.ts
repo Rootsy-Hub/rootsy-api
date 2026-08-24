@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import { z } from "zod"
 import type { SidecarEnv } from "../../sidecar/pop.js"
 import { requireAnyPermission } from "../../sidecar/permissions.js"
+import { requireMutationPermission } from "../../sidecar/mutationPermission.js"
 import {
   SERVICE_CATEGORY_CREATE,
   SERVICE_CATEGORY_DELETE,
@@ -67,7 +68,7 @@ serviceCategoryRoutes.get(
 
 serviceCategoryRoutes.post(
   "/",
-  requireAnyPermission(SERVICE_CATEGORY_CREATE),
+  requireMutationPermission(SERVICE_CATEGORY_CREATE),
   async (c) => {
     const body = createServiceCategoryBodySchema.safeParse(
       await c.req.json().catch(() => null),
@@ -85,6 +86,7 @@ serviceCategoryRoutes.post(
       c.get("supabase"),
       c.get("sidecar").popId,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, 500)
     return c.json(result, 201)
@@ -93,7 +95,7 @@ serviceCategoryRoutes.post(
 
 serviceCategoryRoutes.patch(
   "/:categoryId",
-  requireAnyPermission(SERVICE_CATEGORY_UPDATE),
+  requireMutationPermission(SERVICE_CATEGORY_UPDATE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("categoryId"))
     if (!id.success) {
@@ -116,6 +118,7 @@ serviceCategoryRoutes.patch(
       c.get("sidecar").popId,
       id.data,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -124,7 +127,7 @@ serviceCategoryRoutes.patch(
 
 serviceCategoryRoutes.delete(
   "/:categoryId",
-  requireAnyPermission(SERVICE_CATEGORY_DELETE),
+  requireMutationPermission(SERVICE_CATEGORY_DELETE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("categoryId"))
     if (!id.success) {
@@ -134,6 +137,7 @@ serviceCategoryRoutes.delete(
       c.get("supabase"),
       c.get("sidecar").popId,
       id.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)

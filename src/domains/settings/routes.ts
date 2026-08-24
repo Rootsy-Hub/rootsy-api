@@ -1,6 +1,7 @@
 import { Hono } from "hono"
 import type { SidecarEnv } from "../../sidecar/pop.js"
 import { requireAnyPermission } from "../../sidecar/permissions.js"
+import { requireMutationPermission } from "../../sidecar/mutationPermission.js"
 import { SETTINGS_READ, SETTINGS_UPDATE } from "./allowlist.js"
 import { uploadSettingsImage } from "./image.js"
 import {
@@ -9,6 +10,7 @@ import {
   updateSettingsImages,
 } from "./mutations.js"
 import { getPopSettings } from "./queries.js"
+import { parsePatchBody } from "../../lib/patchBody.js"
 import {
   settingsImageKindSchema,
   updateBusinessBodySchema,
@@ -31,24 +33,20 @@ settingsRoutes.get("/", requireAnyPermission(SETTINGS_READ), async (c) => {
 
 settingsRoutes.patch(
   "/business",
-  requireAnyPermission(SETTINGS_UPDATE),
+  requireMutationPermission(SETTINGS_UPDATE),
   async (c) => {
-    const body = updateBusinessBodySchema.safeParse(
+    const body = parsePatchBody(
+      updateBusinessBodySchema,
       await c.req.json().catch(() => null),
     )
     if (!body.success) {
-      return c.json(
-        {
-          success: false,
-          error: body.error.issues[0]?.message ?? "Body inválido",
-        },
-        400,
-      )
+      return c.json({ success: false, error: body.error }, 400)
     }
     const result = await updateSettingsBusiness(
       c.get("supabase"),
       c.get("sidecar").popId,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -57,24 +55,20 @@ settingsRoutes.patch(
 
 settingsRoutes.patch(
   "/fiscal",
-  requireAnyPermission(SETTINGS_UPDATE),
+  requireMutationPermission(SETTINGS_UPDATE),
   async (c) => {
-    const body = updateFiscalBodySchema.safeParse(
+    const body = parsePatchBody(
+      updateFiscalBodySchema,
       await c.req.json().catch(() => null),
     )
     if (!body.success) {
-      return c.json(
-        {
-          success: false,
-          error: body.error.issues[0]?.message ?? "Body inválido",
-        },
-        400,
-      )
+      return c.json({ success: false, error: body.error }, 400)
     }
     const result = await updateSettingsFiscal(
       c.get("supabase"),
       c.get("sidecar").popId,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -83,24 +77,20 @@ settingsRoutes.patch(
 
 settingsRoutes.patch(
   "/images",
-  requireAnyPermission(SETTINGS_UPDATE),
+  requireMutationPermission(SETTINGS_UPDATE),
   async (c) => {
-    const body = updateImagesBodySchema.safeParse(
+    const body = parsePatchBody(
+      updateImagesBodySchema,
       await c.req.json().catch(() => null),
     )
     if (!body.success) {
-      return c.json(
-        {
-          success: false,
-          error: body.error.issues[0]?.message ?? "Body inválido",
-        },
-        400,
-      )
+      return c.json({ success: false, error: body.error }, 400)
     }
     const result = await updateSettingsImages(
       c.get("supabase"),
       c.get("sidecar").popId,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)

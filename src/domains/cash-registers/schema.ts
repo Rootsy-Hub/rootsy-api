@@ -118,6 +118,7 @@ export const addMovementBodySchema = z.object({
 
 export type CreateCashRegisterBody = z.infer<typeof createCashRegisterBodySchema>
 export type UpdateCashRegisterBody = z.infer<typeof updateCashRegisterBodySchema>
+export type PatchCashRegisterBody = Partial<UpdateCashRegisterBody>
 export type OpenSessionBody = z.infer<typeof openSessionBodySchema>
 export type CloseSessionBody = z.infer<typeof closeSessionBodySchema>
 export type AddMovementBody = z.infer<typeof addMovementBodySchema>

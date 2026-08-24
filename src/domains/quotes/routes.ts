@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import { z } from "zod"
 import type { SidecarEnv } from "../../sidecar/pop.js"
 import { requireAnyPermission } from "../../sidecar/permissions.js"
+import { requireMutationPermission } from "../../sidecar/mutationPermission.js"
 import { QUOTE_CREATE, QUOTE_DELETE, QUOTE_READ } from "./allowlist.js"
 import { createQuote, deleteQuote } from "./mutations.js"
 import { getQuote, listQuotes } from "./queries.js"
@@ -38,7 +39,7 @@ quoteRoutes.get("/", requireAnyPermission(QUOTE_READ), async (c) => {
   return c.json(result)
 })
 
-quoteRoutes.post("/", requireAnyPermission(QUOTE_CREATE), async (c) => {
+quoteRoutes.post("/", requireMutationPermission(QUOTE_CREATE), async (c) => {
   const body = createQuoteBodySchema.safeParse(
     await c.req.json().catch(() => null),
   )
@@ -53,6 +54,7 @@ quoteRoutes.post("/", requireAnyPermission(QUOTE_CREATE), async (c) => {
     c.get("sidecar").popId,
     c.get("userId"),
     body.data,
+    c.get("mutationAudit"),
   )
   if (!result.success) return c.json(result, result.status)
   return c.json(result, 201)
@@ -74,7 +76,7 @@ quoteRoutes.get("/:quoteId", requireAnyPermission(QUOTE_READ), async (c) => {
 
 quoteRoutes.delete(
   "/:quoteId",
-  requireAnyPermission(QUOTE_DELETE),
+  requireMutationPermission(QUOTE_DELETE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("quoteId"))
     if (!id.success) {
@@ -84,6 +86,7 @@ quoteRoutes.delete(
       c.get("supabase"),
       c.get("sidecar").popId,
       id.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)

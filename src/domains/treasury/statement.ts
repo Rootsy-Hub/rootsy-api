@@ -1,4 +1,8 @@
+import { randomUUID } from "node:crypto"
 import type { SupabaseClient } from "@supabase/supabase-js"
+import { applyWithAudit } from "../../audit/apply.js"
+import { auditedDelete, auditedInsert } from "../../audit/simpleWrite.js"
+import type { AuditOp, MutationAuditCtx } from "../../audit/types.js"
 import { parseBankStatementCsv } from "./csv.js"
 import { parseMoney, roundMoney } from "../reports/money.js"
 
@@ -25,6 +29,7 @@ export async function importBankStatementCsv(
   userId: string,
   treasuryAccountId: string,
   csvText: string,
+  audit: MutationAuditCtx,
 ): Promise<
   | { success: true; imported: number; warnings: string[] }
   | { success: false; error: string; status: 400 | 404 | 500 }
@@ -42,25 +47,35 @@ export async function importBankStatementCsv(
   const account = await requireTreasuryAccount(supabase, popId, treasuryAccountId)
   if (!account.ok) return { success: false, error: account.error, status: account.status }
 
-  const rows = parsed.lines.map((line) => ({
-    pop_id: popId,
-    treasury_account_id: treasuryAccountId,
-    line_date: line.lineDate,
-    description: line.description,
-    amount: line.amount,
-    direction: line.direction,
-    source: "csv" as const,
-    created_by: userId,
+  const ops: AuditOp[] = parsed.lines.map((line) => ({
+    op: "insert" as const,
+    table: "bank_statement_lines",
+    row: {
+      id: randomUUID(),
+      pop_id: popId,
+      treasury_account_id: treasuryAccountId,
+      line_date: line.lineDate,
+      description: line.description,
+      amount: line.amount,
+      direction: line.direction,
+      source: "csv",
+      created_by: userId,
+    },
   }))
-  const { error } = await supabase.from("bank_statement_lines").insert(rows)
-  if (error) {
-    return {
-      success: false,
-      error: error.message || "No se pudo importar.",
-      status: 500,
-    }
+
+  const applied = await applyWithAudit(supabase, {
+    kind: "treasury.statement.import",
+    ctx: audit,
+    popId,
+    resourceId: treasuryAccountId,
+    previous: null,
+    next: { imported: ops.length },
+    ops,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
-  return { success: true, imported: rows.length, warnings: parsed.errors }
+  return { success: true, imported: ops.length, warnings: parsed.errors }
 }
 
 export async function addManualBankStatementLine(
@@ -74,6 +89,7 @@ export async function addManualBankStatementLine(
     amount: number
     direction: "in" | "out"
   },
+  audit: MutationAuditCtx,
 ): Promise<
   | { success: true; id: string }
   | { success: false; error: string; status: 400 | 404 | 500 }
@@ -89,28 +105,29 @@ export async function addManualBankStatementLine(
   const account = await requireTreasuryAccount(supabase, popId, treasuryAccountId)
   if (!account.ok) return { success: false, error: account.error, status: account.status }
 
-  const { data, error } = await supabase
-    .from("bank_statement_lines")
-    .insert({
-      pop_id: popId,
-      treasury_account_id: treasuryAccountId,
-      line_date: input.lineDate,
-      description: input.description?.trim() || "Movimiento extracto",
-      amount: amt,
-      direction: input.direction,
-      source: "manual",
-      created_by: userId,
-    })
-    .select("id")
-    .single()
-  if (error || !data?.id) {
-    return {
-      success: false,
-      error: error?.message || "No se pudo guardar.",
-      status: 500,
-    }
+  const id = randomUUID()
+  const row = {
+    id,
+    pop_id: popId,
+    treasury_account_id: treasuryAccountId,
+    line_date: input.lineDate,
+    description: input.description?.trim() || "Movimiento extracto",
+    amount: amt,
+    direction: input.direction,
+    source: "manual",
+    created_by: userId,
   }
-  return { success: true, id: String(data.id) }
+  const applied = await auditedInsert(supabase, {
+    kind: "treasury.statement.add",
+    table: "bank_statement_lines",
+    row,
+    ctx: audit,
+    popId,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
+  }
+  return { success: true, id }
 }
 
 export async function deleteBankStatementLine(
@@ -118,8 +135,9 @@ export async function deleteBankStatementLine(
   popId: string,
   treasuryAccountId: string,
   lineId: string,
+  audit: MutationAuditCtx,
 ): Promise<
-  { success: true } | { success: false; error: string; status: 404 | 500 }
+  { success: true } | { success: false; error: string; status: 400 | 404 | 500 }
 > {
   const { data, error: readErr } = await supabase
     .from("bank_statement_lines")
@@ -134,18 +152,16 @@ export async function deleteBankStatementLine(
   if (!data?.id) {
     return { success: false, error: "Línea de extracto no encontrada.", status: 404 }
   }
-  const { error } = await supabase
-    .from("bank_statement_lines")
-    .delete()
-    .eq("id", lineId)
-    .eq("pop_id", popId)
-    .eq("treasury_account_id", treasuryAccountId)
-  if (error) {
-    return {
-      success: false,
-      error: error.message || "No se pudo eliminar.",
-      status: 500,
-    }
+  const applied = await auditedDelete(supabase, {
+    kind: "treasury.statement.delete",
+    table: "bank_statement_lines",
+    id: lineId,
+    ctx: audit,
+    popId,
+    previous: data,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
   return { success: true }
 }

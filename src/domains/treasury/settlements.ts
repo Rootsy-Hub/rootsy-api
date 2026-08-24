@@ -1,6 +1,12 @@
+import { randomUUID } from "node:crypto"
 import type { SupabaseClient } from "@supabase/supabase-js"
+import { applyWithAudit } from "../../audit/apply.js"
+import type { MutationAuditCtx } from "../../audit/types.js"
 import { parseMoney, roundMoney } from "../reports/money.js"
-import { postPosAcreditationLedger, postTreasurySettlementLedger } from "./ledger.js"
+import {
+  buildPosAcreditationLedgerOps,
+  buildTreasurySettlementLedgerOps,
+} from "./ledger.js"
 import { parseTreasuryKind } from "./kinds.js"
 import { computeChildPendingBalanceAsOf } from "./pending.js"
 import type { PosAcreditationBody, SettlementBody } from "./schema.js"
@@ -10,6 +16,7 @@ export async function recordTreasurySettlement(
   popId: string,
   userId: string,
   input: SettlementBody,
+  audit: MutationAuditCtx,
 ): Promise<
   | { success: true; id: string }
   | { success: false; error: string; status: 400 | 404 | 500 }
@@ -78,42 +85,51 @@ export async function recordTreasurySettlement(
     }
   }
 
-  const { data: ins, error: insErr } = await supabase
-    .from("treasury_settlements")
-    .insert({
-      pop_id: popId,
-      card_treasury_account_id: cardTaId,
-      funding_treasury_account_id: fundTaId,
-      amount: principal,
-      principal_amount: principal,
-      adjustment_amount: adjustment,
-      settled_at: input.settledAt,
-      notes: input.notes?.trim() || "",
-      created_by: userId,
-    })
-    .select("id")
-    .single()
-  if (insErr || !ins?.id) {
-    return {
-      success: false,
-      error: insErr?.message || "No se pudo registrar la liquidación.",
-      status: 500,
-    }
-  }
-  const settlementId = String(ins.id)
-
-  const ledger = await postTreasurySettlementLedger(supabase, {
+  const settlementId = randomUUID()
+  const ledger = await buildTreasurySettlementLedgerOps(supabase, {
     popId,
     userId,
     settlementId,
+    principal,
+    adjustment,
+    settledAt: input.settledAt,
+    cardTreasuryAccountId: cardTaId,
+    fundingTreasuryAccountId: fundTaId,
   })
   if (!ledger.success) {
-    await supabase
-      .from("treasury_settlements")
-      .delete()
-      .eq("id", settlementId)
-      .eq("pop_id", popId)
     return { success: false, error: ledger.error, status: 500 }
+  }
+
+  const applied = await applyWithAudit(supabase, {
+    kind: "treasury.settlement",
+    ctx: audit,
+    popId,
+    resourceId: settlementId,
+    previous: null,
+    next: { id: settlementId, principal, adjustment },
+    ops: [
+      {
+        op: "insert",
+        table: "treasury_settlements",
+        row: {
+          id: settlementId,
+          pop_id: popId,
+          card_treasury_account_id: cardTaId,
+          funding_treasury_account_id: fundTaId,
+          amount: principal,
+          principal_amount: principal,
+          adjustment_amount: adjustment,
+          settled_at: input.settledAt,
+          notes: input.notes?.trim() || "",
+          created_by: userId,
+          accounting_entry_id: ledger.entryId,
+        },
+      },
+      ...ledger.ops,
+    ],
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
   return { success: true, id: settlementId }
 }
@@ -124,6 +140,7 @@ export async function recordPosAcreditation(
   userId: string,
   motherTreasuryAccountId: string,
   input: PosAcreditationBody,
+  audit: MutationAuditCtx,
 ): Promise<
   | { success: true; entryId: string }
   | { success: false; error: string; status: 400 | 404 | 500 }
@@ -167,53 +184,56 @@ export async function recordPosAcreditation(
     }
   }
 
-  const { data: ins, error: insErr } = await supabase
-    .from("treasury_pos_acreditations")
-    .insert({
-      pop_id: popId,
-      pos_treasury_account_id: posTaId,
-      mother_treasury_account_id: motherTaId,
-      principal_amount: principal,
-      adjustment_amount: adjustment,
-      credited_at: input.creditedAt,
-      notes: input.notes?.trim() || "",
-      created_by: userId,
-    })
-    .select("id")
-    .single()
-  if (insErr || !ins?.id) {
-    return {
-      success: false,
-      error: insErr?.message || "No se pudo registrar la acreditación.",
-      status: 500,
-    }
-  }
-  const acreditationId = String(ins.id)
-
-  const ledger = await postPosAcreditationLedger(supabase, {
+  const acreditationId = randomUUID()
+  const ledger = await buildPosAcreditationLedgerOps(supabase, {
     popId,
     userId,
     acreditationId,
+    principal,
+    adjustment,
+    creditedAt: input.creditedAt,
+    notes: input.notes?.trim() || "",
+    posTreasuryAccountId: posTaId,
+    motherTreasuryAccountId: motherTaId,
   })
   if (!ledger.success) {
-    await supabase
-      .from("treasury_pos_acreditations")
-      .delete()
-      .eq("id", acreditationId)
-      .eq("pop_id", popId)
     return { success: false, error: ledger.error, status: 500 }
   }
 
-  const { data: linked } = await supabase
-    .from("treasury_pos_acreditations")
-    .select("accounting_entry_id")
-    .eq("id", acreditationId)
-    .eq("pop_id", popId)
-    .maybeSingle()
+  const applied = await applyWithAudit(supabase, {
+    kind: "treasury.pos.acreditation",
+    ctx: audit,
+    popId,
+    resourceId: acreditationId,
+    previous: null,
+    next: { id: acreditationId, principal, adjustment },
+    ops: [
+      {
+        op: "insert",
+        table: "treasury_pos_acreditations",
+        row: {
+          id: acreditationId,
+          pop_id: popId,
+          pos_treasury_account_id: posTaId,
+          mother_treasury_account_id: motherTaId,
+          principal_amount: principal,
+          adjustment_amount: adjustment,
+          credited_at: input.creditedAt,
+          notes: input.notes?.trim() || "",
+          created_by: userId,
+          accounting_entry_id: ledger.entryId,
+        },
+      },
+      ...ledger.ops,
+    ],
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
+  }
 
   return {
     success: true,
-    entryId: String(linked?.accounting_entry_id ?? acreditationId),
+    entryId: ledger.entryId,
   }
 }
 

@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import { z } from "zod"
 import type { SidecarEnv } from "../../sidecar/pop.js"
 import { requireAnyPermission } from "../../sidecar/permissions.js"
+import { requireMutationPermission } from "../../sidecar/mutationPermission.js"
 import {
   PRINTER_CREATE,
   PRINTER_DELETE,
@@ -15,6 +16,7 @@ import {
   listPrinters,
   updatePrinter,
 } from "./queries.js"
+import { parsePatchBody } from "../../lib/patchBody.js"
 import { upsertPrinterBodySchema } from "./schema.js"
 
 const idSchema = z.string().uuid()
@@ -34,7 +36,7 @@ printerRoutes.get("/", requireAnyPermission(PRINTER_READ), async (c) => {
   return c.json(result)
 })
 
-printerRoutes.post("/", requireAnyPermission(PRINTER_CREATE), async (c) => {
+printerRoutes.post("/", requireMutationPermission(PRINTER_CREATE), async (c) => {
   const body = upsertPrinterBodySchema.safeParse(
     await c.req.json().catch(() => null),
   )
@@ -43,6 +45,7 @@ printerRoutes.post("/", requireAnyPermission(PRINTER_CREATE), async (c) => {
     c.get("supabase"),
     c.get("sidecar").popId,
     body.data,
+    c.get("mutationAudit"),
   )
   if (!result.success) return c.json(result, result.status ?? 500)
   return c.json(result, 201)
@@ -68,21 +71,23 @@ printerRoutes.get(
 
 printerRoutes.patch(
   "/:printerId",
-  requireAnyPermission(PRINTER_UPDATE),
+  requireMutationPermission(PRINTER_UPDATE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("printerId"))
     if (!id.success) {
       return c.json({ success: false, error: "printerId inválido" }, 400)
     }
-    const body = upsertPrinterBodySchema.safeParse(
+    const body = parsePatchBody(
+      upsertPrinterBodySchema,
       await c.req.json().catch(() => null),
     )
-    if (!body.success) return c.json(bodyError(body.error.issues), 400)
+    if (!body.success) return c.json({ success: false, error: body.error }, 400)
     const result = await updatePrinter(
       c.get("supabase"),
       c.get("sidecar").popId,
       id.data,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -91,7 +96,7 @@ printerRoutes.patch(
 
 printerRoutes.delete(
   "/:printerId",
-  requireAnyPermission(PRINTER_DELETE),
+  requireMutationPermission(PRINTER_DELETE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("printerId"))
     if (!id.success) {
@@ -101,6 +106,7 @@ printerRoutes.delete(
       c.get("supabase"),
       c.get("sidecar").popId,
       id.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)

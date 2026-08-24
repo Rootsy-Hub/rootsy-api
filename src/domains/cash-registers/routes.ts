@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import { z } from "zod"
 import type { SidecarEnv } from "../../sidecar/pop.js"
 import { requireAnyPermission } from "../../sidecar/permissions.js"
+import { requireMutationPermission } from "../../sidecar/mutationPermission.js"
 import {
   CASH_REGISTER_CREATE,
   CASH_REGISTER_DELETE,
@@ -19,6 +20,7 @@ import {
 import { getCashRegistersOpenTotals } from "./openTotals.js"
 import { getCashRegistersPeriodReport, getCashRegistersPeriodTotals } from "./period.js"
 import { getCashRegistersFormContext, listCashRegisters } from "./queries.js"
+import { parsePatchBody } from "../../lib/patchBody.js"
 import {
   addMovementBodySchema,
   closeSessionBodySchema,
@@ -129,7 +131,7 @@ cashRegisterRoutes.get("/", requireAnyPermission(CASH_REGISTER_READ), async (c) 
   return c.json(result)
 })
 
-cashRegisterRoutes.post("/", requireAnyPermission(CASH_REGISTER_CREATE), async (c) => {
+cashRegisterRoutes.post("/", requireMutationPermission(CASH_REGISTER_CREATE), async (c) => {
   const body = createCashRegisterBodySchema.safeParse(
     await c.req.json().catch(() => null),
   )
@@ -138,6 +140,7 @@ cashRegisterRoutes.post("/", requireAnyPermission(CASH_REGISTER_CREATE), async (
     c.get("supabase"),
     c.get("sidecar").popId,
     body.data,
+    c.get("mutationAudit"),
   )
   if (!result.success) return c.json(result, result.status)
   return c.json(result, 201)
@@ -167,7 +170,7 @@ cashRegisterRoutes.get(
 
 cashRegisterRoutes.post(
   "/sessions/:sessionId/close",
-  requireAnyPermission(CASH_REGISTER_UPDATE),
+  requireMutationPermission(CASH_REGISTER_UPDATE),
   async (c) => {
     const sessionId = idSchema.safeParse(c.req.param("sessionId"))
     if (!sessionId.success) {
@@ -187,6 +190,7 @@ cashRegisterRoutes.post(
       sidecar.keys,
       sidecar.isOwner,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -195,7 +199,7 @@ cashRegisterRoutes.post(
 
 cashRegisterRoutes.post(
   "/sessions/:sessionId/movements",
-  requireAnyPermission(CASH_REGISTER_CREATE),
+  requireMutationPermission(CASH_REGISTER_CREATE),
   async (c) => {
     const sessionId = idSchema.safeParse(c.req.param("sessionId"))
     if (!sessionId.success) {
@@ -211,6 +215,7 @@ cashRegisterRoutes.post(
       sessionId.data,
       c.get("userId"),
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -239,7 +244,7 @@ cashRegisterRoutes.get(
 
 cashRegisterRoutes.post(
   "/:registerId/sessions",
-  requireAnyPermission(CASH_REGISTER_CREATE),
+  requireMutationPermission(CASH_REGISTER_CREATE),
   async (c) => {
     const registerId = idSchema.safeParse(c.req.param("registerId"))
     if (!registerId.success) {
@@ -255,6 +260,7 @@ cashRegisterRoutes.post(
       registerId.data,
       c.get("userId"),
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -283,21 +289,23 @@ cashRegisterRoutes.get(
 
 cashRegisterRoutes.patch(
   "/:registerId",
-  requireAnyPermission(CASH_REGISTER_UPDATE),
+  requireMutationPermission(CASH_REGISTER_UPDATE),
   async (c) => {
     const registerId = idSchema.safeParse(c.req.param("registerId"))
     if (!registerId.success) {
       return c.json({ success: false, error: "Caja inválida" }, 400)
     }
-    const body = updateCashRegisterBodySchema.safeParse(
+    const body = parsePatchBody(
+      updateCashRegisterBodySchema,
       await c.req.json().catch(() => null),
     )
-    if (!body.success) return c.json(bodyError(body.error.issues), 400)
+    if (!body.success) return c.json({ success: false, error: body.error }, 400)
     const result = await updateCashRegister(
       c.get("supabase"),
       c.get("sidecar").popId,
       registerId.data,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -306,7 +314,7 @@ cashRegisterRoutes.patch(
 
 cashRegisterRoutes.delete(
   "/:registerId",
-  requireAnyPermission(CASH_REGISTER_DELETE),
+  requireMutationPermission(CASH_REGISTER_DELETE),
   async (c) => {
     const registerId = idSchema.safeParse(c.req.param("registerId"))
     if (!registerId.success) {
@@ -316,6 +324,7 @@ cashRegisterRoutes.delete(
       c.get("supabase"),
       c.get("sidecar").popId,
       registerId.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)

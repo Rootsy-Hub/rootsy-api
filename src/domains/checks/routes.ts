@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import { z } from "zod"
 import type { SidecarEnv } from "../../sidecar/pop.js"
 import { requireAnyPermission } from "../../sidecar/permissions.js"
+import { requireMutationPermission } from "../../sidecar/mutationPermission.js"
 import { CHECK_CREATE, CHECK_READ, CHECK_UPDATE } from "./allowlist.js"
 import {
   clearCheck,
@@ -83,7 +84,7 @@ checkRoutes.get("/parties", requireAnyPermission(CHECK_CREATE), async (c) => {
   return c.json(result)
 })
 
-checkRoutes.post("/", requireAnyPermission(CHECK_CREATE), async (c) => {
+checkRoutes.post("/", requireMutationPermission(CHECK_CREATE), async (c) => {
   const body = createCheckBodySchema.safeParse(
     await c.req.json().catch(() => null),
   )
@@ -101,6 +102,7 @@ checkRoutes.post("/", requireAnyPermission(CHECK_CREATE), async (c) => {
     c.get("sidecar").popId,
     c.get("userId"),
     body.data,
+    c.get("mutationAudit"),
   )
   if (!result.success) return c.json(result, result.status)
   return c.json(result, 201)
@@ -108,7 +110,7 @@ checkRoutes.post("/", requireAnyPermission(CHECK_CREATE), async (c) => {
 
 checkRoutes.post(
   "/:checkId/deposit",
-  requireAnyPermission(CHECK_UPDATE),
+  requireMutationPermission(CHECK_UPDATE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("checkId"))
     if (!id.success) {
@@ -132,6 +134,7 @@ checkRoutes.post(
       c.get("userId"),
       id.data,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -140,7 +143,7 @@ checkRoutes.post(
 
 checkRoutes.post(
   "/:checkId/clear",
-  requireAnyPermission(CHECK_UPDATE),
+  requireMutationPermission(CHECK_UPDATE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("checkId"))
     if (!id.success) {
@@ -164,6 +167,7 @@ checkRoutes.post(
       c.get("userId"),
       id.data,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -172,7 +176,7 @@ checkRoutes.post(
 
 checkRoutes.post(
   "/:checkId/reject",
-  requireAnyPermission(CHECK_UPDATE),
+  requireMutationPermission(CHECK_UPDATE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("checkId"))
     if (!id.success) {
@@ -196,6 +200,7 @@ checkRoutes.post(
       c.get("userId"),
       id.data,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -204,7 +209,7 @@ checkRoutes.post(
 
 checkRoutes.post(
   "/:checkId/void",
-  requireAnyPermission(CHECK_UPDATE),
+  requireMutationPermission(CHECK_UPDATE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("checkId"))
     if (!id.success) {
@@ -217,6 +222,7 @@ checkRoutes.post(
       c.get("userId"),
       sidecar.popSiteId,
       id.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)

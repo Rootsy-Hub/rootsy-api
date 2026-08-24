@@ -1,6 +1,17 @@
+import { randomUUID } from "node:crypto"
 import type { SupabaseClient } from "@supabase/supabase-js"
+import { applyWithAudit } from "../../audit/apply.js"
+import { auditedDelete } from "../../audit/simpleWrite.js"
+import type { AuditOp, MutationAuditCtx } from "../../audit/types.js"
 import { normalizeScheduleDays, validatePromotionSchedule } from "./schedule.js"
-import type { SlotInput, UpsertPromotionBody } from "./schema.js"
+import { mergePatch } from "../../lib/patchBody.js"
+import { getPromotion } from "./queries.js"
+import type {
+  PatchPromotionBody,
+  PromotionDetail,
+  SlotInput,
+  UpsertPromotionBody,
+} from "./schema.js"
 import {
   isPromotionBenefitTarget,
   isPromotionOptionKind,
@@ -260,69 +271,67 @@ function promotionInsertRow(
   return base
 }
 
-async function syncPromotionSlots(
-  supabase: SupabaseClient,
+function buildSlotInsertOps(
   popId: string,
   promotionId: string,
   slots: SlotInput[],
-): Promise<{ ok: true } | { ok: false; error: string }> {
-  const { error: delSlotErr } = await supabase
-    .from("promotion_slots")
-    .delete()
-    .eq("promotion_id", promotionId)
-    .eq("pop_id", popId)
-  if (delSlotErr) {
-    return {
-      ok: false,
-      error: delSlotErr.message || "No se pudieron actualizar ítems.",
-    }
-  }
-
+): AuditOp[] {
+  const ops: AuditOp[] = []
   for (let i = 0; i < slots.length; i++) {
     const slot = slots[i]
-    const { data: slotRow, error: slotErr } = await supabase
-      .from("promotion_slots")
-      .insert({
+    const slotId = randomUUID()
+    ops.push({
+      op: "insert",
+      table: "promotion_slots",
+      row: {
+        id: slotId,
         promotion_id: promotionId,
         pop_id: popId,
         label: slot.label.trim(),
         quantity: Number(slot.quantity),
         sort_order: i,
+      },
+    })
+    for (const [index, opt] of slot.options.entries()) {
+      ops.push({
+        op: "insert",
+        table: "promotion_slot_options",
+        row: {
+          id: randomUUID(),
+          promotion_slot_id: slotId,
+          pop_id: popId,
+          article_id: opt.kind === "article" ? opt.refId.trim() : null,
+          recipe_id: opt.kind === "recipe" ? opt.refId.trim() : null,
+          sort_order: index,
+        },
       })
-      .select("id")
-      .single()
-    if (slotErr || !slotRow?.id) {
-      return {
-        ok: false,
-        error: slotErr?.message || "No se pudo guardar un ítem de la promoción.",
-      }
-    }
-    const slotId = String(slotRow.id)
-    if (slot.options.length === 0) continue
-    const { error: optErr } = await supabase.from("promotion_slot_options").insert(
-      slot.options.map((opt, index) => ({
-        promotion_slot_id: slotId,
-        pop_id: popId,
-        article_id: opt.kind === "article" ? opt.refId.trim() : null,
-        recipe_id: opt.kind === "recipe" ? opt.refId.trim() : null,
-        sort_order: index,
-      })),
-    )
-    if (optErr) {
-      return {
-        ok: false,
-        error: optErr.message || "No se pudieron guardar opciones.",
-      }
     }
   }
+  return ops
+}
 
-  return { ok: true }
+function slotReplaceOps(
+  popId: string,
+  promotionId: string,
+  existingSlots: PromotionDetail["slots"],
+  nextSlots: SlotInput[],
+): AuditOp[] {
+  const ops: AuditOp[] = []
+  for (const slot of existingSlots) {
+    for (const opt of slot.options) {
+      ops.push({ op: "delete", table: "promotion_slot_options", id: opt.id })
+    }
+    ops.push({ op: "delete", table: "promotion_slots", id: slot.id })
+  }
+  ops.push(...buildSlotInsertOps(popId, promotionId, nextSlots))
+  return ops
 }
 
 export async function createPromotion(
   supabase: SupabaseClient,
   popId: string,
   input: UpsertPromotionBody,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const validation = validatePromotionInput(input)
   if (!validation.ok) return { success: false, error: validation.error, status: 400 }
@@ -341,64 +350,114 @@ export async function createPromotion(
     .maybeSingle()
   const sortOrder = (Number(maxRow?.sort_order ?? -1) || -1) + 1
 
-  const { data: created, error } = await supabase
-    .from("promotions")
-    .insert(promotionInsertRow(popId, input, sortOrder))
-    .select("id")
-    .single()
-
-  if (error || !created?.id) {
+  const promotionId = randomUUID()
+  const row = { id: promotionId, ...promotionInsertRow(popId, input, sortOrder) }
+  const ops: AuditOp[] = [
+    { op: "insert", table: "promotions", row },
+    ...buildSlotInsertOps(popId, promotionId, input.slots),
+  ]
+  const applied = await applyWithAudit(supabase, {
+    kind: "promotions.create",
+    ctx: audit,
+    popId,
+    resourceId: promotionId,
+    previous: null,
+    next: { ...row, slots: input.slots },
+    ops,
+  })
+  if (!applied.success) {
     return {
       success: false,
-      error: error?.message || "No se pudo crear la promoción.",
-      status: 500,
+      error: applied.error || "No se pudo crear la promoción.",
+      status: applied.status,
     }
   }
 
-  const promotionId = String(created.id)
-  const sync = await syncPromotionSlots(supabase, popId, promotionId, input.slots)
-  if (!sync.ok) {
-    await supabase.from("promotions").delete().eq("id", promotionId).eq("pop_id", popId)
-    return { success: false, error: sync.error, status: 400 }
-  }
-
   return { success: true, id: promotionId }
+}
+
+function promotionToUpsertBody(row: PromotionDetail): UpsertPromotionBody {
+  return {
+    name: row.name,
+    description: row.description,
+    imageUrl: row.imageUrl ?? "",
+    promotionType: row.promotionType,
+    pricingMode: row.pricingMode,
+    fixedPrice: row.fixedPrice,
+    discountMode: row.discountMode,
+    discountValue: row.discountValue,
+    buyQuantity: row.buyQuantity,
+    benefitQuantity: row.benefitQuantity,
+    benefitDiscountPct: row.benefitDiscountPct,
+    applyBenefitTo: row.applyBenefitTo,
+    autoApply: row.autoApply,
+    showInMenu: row.showInMenu,
+    isActive: row.isActive,
+    validFrom: row.validFrom,
+    validUntil: row.validUntil,
+    validTimeStart: row.validTimeStart,
+    validTimeEnd: row.validTimeEnd,
+    scheduleDays: row.scheduleDays,
+    slots: row.slots.map((slot) => ({
+      label: slot.label,
+      quantity: slot.quantity,
+      options: slot.options.map((option) => ({
+        kind: option.kind,
+        refId: option.refId,
+      })),
+    })),
+  }
 }
 
 export async function updatePromotion(
   supabase: SupabaseClient,
   popId: string,
   promotionId: string,
-  input: UpsertPromotionBody,
+  patch: PatchPromotionBody,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
+  const current = await getPromotion(supabase, popId, promotionId)
+  if (!current.success) {
+    return {
+      success: false,
+      error: current.error,
+      status: current.status,
+    }
+  }
+  const input = mergePatch(promotionToUpsertBody(current.data), patch)
+
   const validation = validatePromotionInput(input)
   if (!validation.ok) return { success: false, error: validation.error, status: 400 }
-
-  const { data: existing } = await supabase
-    .from("promotions")
-    .select("id, sort_order")
-    .eq("id", promotionId)
-    .eq("pop_id", popId)
-    .maybeSingle()
-  if (!existing?.id) {
-    return { success: false, error: "Promoción no encontrada.", status: 404 }
-  }
 
   const optionsCheck = await validatePromotionOptions(supabase, popId, input.slots)
   if (!optionsCheck.ok) {
     return { success: false, error: optionsCheck.error, status: 400 }
   }
 
-  const sortOrder = Number(existing.sort_order ?? 0) || 0
-  const { error } = await supabase
-    .from("promotions")
-    .update(promotionInsertRow(popId, input, sortOrder))
-    .eq("id", promotionId)
-    .eq("pop_id", popId)
-  if (error) return { success: false, error: error.message, status: 500 }
+  const sortOrder = Number(current.data.sortOrder ?? 0) || 0
+  const updatePayload = promotionInsertRow(popId, input, sortOrder)
+  const { pop_id: _popId, ...updateRow } = updatePayload
+  const ops: AuditOp[] = [
+    { op: "update", table: "promotions", id: promotionId, row: updateRow },
+  ]
+  if (patch.slots !== undefined) {
+    ops.push(
+      ...slotReplaceOps(popId, promotionId, current.data.slots, patch.slots),
+    )
+  }
 
-  const sync = await syncPromotionSlots(supabase, popId, promotionId, input.slots)
-  if (!sync.ok) return { success: false, error: sync.error, status: 400 }
+  const applied = await applyWithAudit(supabase, {
+    kind: "promotions.patch",
+    ctx: audit,
+    popId,
+    resourceId: promotionId,
+    previous: current.data,
+    next: { ...current.data, ...updateRow, slots: input.slots },
+    ops,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
+  }
 
   return { success: true }
 }
@@ -408,6 +467,7 @@ export async function deletePromotion(
   popId: string,
   promotionId: string,
   confirmationTyped: string,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const { data: promotion, error: fetchError } = await supabase
     .from("promotions")
@@ -435,11 +495,16 @@ export async function deletePromotion(
     }
   }
 
-  const { error } = await supabase
-    .from("promotions")
-    .delete()
-    .eq("id", promotionId)
-    .eq("pop_id", popId)
-  if (error) return { success: false, error: error.message, status: 500 }
+  const applied = await auditedDelete(supabase, {
+    kind: "promotions.delete",
+    table: "promotions",
+    id: promotionId,
+    ctx: audit,
+    popId,
+    previous: promotion,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
+  }
   return { success: true }
 }

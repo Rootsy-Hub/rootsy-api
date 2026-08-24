@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import { z } from "zod"
 import type { SidecarEnv } from "../../sidecar/pop.js"
 import { requireAnyPermission } from "../../sidecar/permissions.js"
+import { requireMutationPermission } from "../../sidecar/mutationPermission.js"
 import {
   EXPENSE_CREATE,
   EXPENSE_DELETE,
@@ -57,7 +58,7 @@ expenseRoutes.get(
   },
 )
 
-expenseRoutes.post("/", requireAnyPermission(EXPENSE_CREATE), async (c) => {
+expenseRoutes.post("/", requireMutationPermission(EXPENSE_CREATE), async (c) => {
   const body = createExpenseBodySchema.safeParse(
     await c.req.json().catch(() => null),
   )
@@ -75,6 +76,7 @@ expenseRoutes.post("/", requireAnyPermission(EXPENSE_CREATE), async (c) => {
     c.get("sidecar").popId,
     c.get("userId"),
     body.data,
+    c.get("mutationAudit"),
   )
   if (!result.success) return c.json(result, result.status)
   return c.json(result, 201)
@@ -82,7 +84,7 @@ expenseRoutes.post("/", requireAnyPermission(EXPENSE_CREATE), async (c) => {
 
 expenseRoutes.post(
   "/:expenseId/payments",
-  requireAnyPermission(EXPENSE_UPDATE),
+  requireMutationPermission(EXPENSE_UPDATE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("expenseId"))
     if (!id.success) {
@@ -106,6 +108,7 @@ expenseRoutes.post(
       c.get("userId"),
       id.data,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -114,7 +117,7 @@ expenseRoutes.post(
 
 expenseRoutes.post(
   "/:expenseId/void",
-  requireAnyPermission(EXPENSE_UPDATE),
+  requireMutationPermission(EXPENSE_UPDATE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("expenseId"))
     if (!id.success) {
@@ -140,6 +143,7 @@ expenseRoutes.post(
       c.get("userId"),
       id.data,
       body.data.reason,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -148,7 +152,7 @@ expenseRoutes.post(
 
 expenseRoutes.delete(
   "/:expenseId",
-  requireAnyPermission(EXPENSE_DELETE),
+  requireMutationPermission(EXPENSE_DELETE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("expenseId"))
     if (!id.success) {
@@ -158,6 +162,7 @@ expenseRoutes.delete(
       c.get("supabase"),
       c.get("sidecar").popId,
       id.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)

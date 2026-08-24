@@ -87,6 +87,7 @@ export const deleteClientBodySchema = z.object({
 })
 
 export type UpsertClientBody = z.infer<typeof upsertClientBodySchema>
+export type PatchClientBody = Partial<UpsertClientBody>
 
 export type ClientRow = {
   id: string

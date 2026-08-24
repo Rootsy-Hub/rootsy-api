@@ -1,4 +1,11 @@
+import { randomUUID } from "node:crypto"
 import type { SupabaseClient } from "@supabase/supabase-js"
+import { applyWithAudit } from "../../audit/apply.js"
+import {
+  auditedInsert,
+  auditedUpdate,
+} from "../../audit/simpleWrite.js"
+import type { AuditOp, MutationAuditCtx } from "../../audit/types.js"
 import { resolveArticleReferenceUnitCostsByArticleId } from "../recipes/articleReferenceCost.js"
 import { applyInventoryFefoOrder, parseInventoryExpiresAt } from "./expiry.js"
 import {
@@ -14,7 +21,7 @@ type MutateResult =
 
 type CreateLocationResult =
   | { success: true; data: { locationId: string } }
-  | { success: false; error: string; status: 400 | 409 | 500 }
+  | { success: false; error: string; status: 400 | 404 | 409 | 500 }
 
 function articleReferenceCostError(articleName: string): string {
   const label = articleName.trim() || "el artículo"
@@ -38,6 +45,7 @@ export async function createInventoryLocation(
   supabase: SupabaseClient,
   popId: string,
   name: string,
+  audit: MutationAuditCtx,
 ): Promise<CreateLocationResult> {
   const trimmed = name.trim()
   if (trimmed.length < 1) {
@@ -51,28 +59,33 @@ export async function createInventoryLocation(
     .select("id", { count: "exact", head: true })
     .eq("pop_id", popId)
     .is("archived_at", null)
-  const { data, error } = await supabase
-    .from("inventory_locations")
-    .insert({
-      pop_id: popId,
-      name: trimmed,
-      is_default: false,
-      is_sellable: false,
-      sort_order: (count ?? 0) + 1,
-    })
-    .select("id")
-    .single()
-  if (error || !data?.id) {
-    if (error?.code === "23505") {
+  const id = randomUUID()
+  const row = {
+    id,
+    pop_id: popId,
+    name: trimmed,
+    is_default: false,
+    is_sellable: false,
+    sort_order: (count ?? 0) + 1,
+  }
+  const applied = await auditedInsert(supabase, {
+    kind: "inventory.location.create",
+    table: "inventory_locations",
+    row,
+    ctx: audit,
+    popId,
+  })
+  if (!applied.success) {
+    if (applied.error.includes("duplicate") || applied.error.includes("unique")) {
       return { success: false, error: "Ya hay un depósito con ese nombre.", status: 409 }
     }
     return {
       success: false,
-      error: error?.message || "No se pudo crear el depósito.",
-      status: 500,
+      error: applied.error || "No se pudo crear el depósito.",
+      status: applied.status,
     }
   }
-  return { success: true, data: { locationId: String(data.id) } }
+  return { success: true, data: { locationId: id } }
 }
 
 export async function renameInventoryLocation(
@@ -80,6 +93,7 @@ export async function renameInventoryLocation(
   popId: string,
   locationId: string,
   name: string,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const trimmed = name.trim()
   if (trimmed.length < 1) {
@@ -90,16 +104,21 @@ export async function renameInventoryLocation(
   }
   const location = await resolvePopInventoryLocationId(supabase, popId, locationId)
   if (!location.success) return { success: false, error: location.error, status: 400 }
-  const { error } = await supabase
-    .from("inventory_locations")
-    .update({ name: trimmed })
-    .eq("id", location.locationId)
-    .eq("pop_id", popId)
-  if (error) {
-    if (error.code === "23505") {
+  const applied = await auditedUpdate(supabase, {
+    kind: "inventory.location.rename",
+    table: "inventory_locations",
+    id: location.locationId,
+    row: { name: trimmed },
+    ctx: audit,
+    popId,
+    previous: { name: locationId },
+    next: { name: trimmed },
+  })
+  if (!applied.success) {
+    if (applied.error.includes("duplicate") || applied.error.includes("unique")) {
       return { success: false, error: "Ya hay un depósito con ese nombre.", status: 409 }
     }
-    return { success: false, error: error.message || "No se pudo renombrar.", status: 500 }
+    return { success: false, error: applied.error, status: applied.status }
   }
   return { success: true }
 }
@@ -108,6 +127,7 @@ export async function archiveInventoryLocation(
   supabase: SupabaseClient,
   popId: string,
   locationId: string,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const { data: loc, error: locErr } = await supabase
     .from("inventory_locations")
@@ -168,13 +188,18 @@ export async function archiveInventoryLocation(
       status: 409,
     }
   }
-  const { error } = await supabase
-    .from("inventory_locations")
-    .update({ archived_at: new Date().toISOString() })
-    .eq("id", loc.id)
-    .eq("pop_id", popId)
-  if (error) {
-    return { success: false, error: error.message || "No se pudo archivar.", status: 500 }
+  const applied = await auditedUpdate(supabase, {
+    kind: "inventory.location.archive",
+    table: "inventory_locations",
+    id: loc.id,
+    row: { archived_at: new Date().toISOString() },
+    ctx: audit,
+    popId,
+    previous: loc,
+    next: { ...loc, archived_at: true },
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
   return { success: true }
 }
@@ -184,6 +209,7 @@ export async function transferInventoryStock(
   popId: string,
   userId: string,
   input: TransferBody,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   if (input.fromLocationId.trim() === input.toLocationId.trim()) {
     return { success: false, error: "Elegí dos depósitos distintos.", status: 400 }
@@ -330,78 +356,57 @@ export async function transferInventoryStock(
     .maybeSingle()
   const fromName = String(fromNameRow?.name ?? "origen")
   const toName = String(toNameRow?.name ?? "destino")
-  const transferGroupId = crypto.randomUUID()
+  const transferGroupId = randomUUID()
   const note = `Traslado — ${articleName} · ${fromName} → ${toName}`
+  const outId = randomUUID()
+  const inId = randomUUID()
 
-  const { data: outMov, error: outErr } = await supabase
-    .from("inventory_movements")
-    .insert({
-      pop_id: popId,
-      location_id: from.locationId,
-      counterpart_location_id: to.locationId,
-      transfer_group_id: transferGroupId,
-      article_id: input.articleId,
-      quantity_delta: -qtyAbs,
-      movement_type: "transfer_out",
-      note,
-      created_by: userId,
-    })
-    .select("id")
-    .single()
-  if (outErr || !outMov?.id) {
-    return {
-      success: false,
-      error: outErr?.message || "No se pudo registrar la salida.",
-      status: 500,
-    }
-  }
-  const outId = String(outMov.id)
-
-  const undoOut = async () => {
-    for (const take of takes) {
-      await supabase
-        .from("inventory_cost_layers")
-        .update({ quantity_remaining: take.remainingBefore })
-        .eq("id", take.layerId)
-    }
-    await supabase.from("inventory_layer_allocations").delete().eq("inventory_movement_id", outId)
-    await supabase.from("inventory_movements").delete().eq("id", outId)
-  }
+  const ops: AuditOp[] = [
+    {
+      op: "insert",
+      table: "inventory_movements",
+      row: {
+        id: outId,
+        pop_id: popId,
+        location_id: from.locationId,
+        counterpart_location_id: to.locationId,
+        transfer_group_id: transferGroupId,
+        article_id: input.articleId,
+        quantity_delta: -qtyAbs,
+        movement_type: "transfer_out",
+        note,
+        created_by: userId,
+      },
+    },
+  ]
 
   for (const take of takes) {
-    const { error: allocErr } = await supabase.from("inventory_layer_allocations").insert({
-      pop_id: popId,
-      layer_id: take.layerId,
-      article_id: input.articleId,
-      inventory_movement_id: outId,
-      quantity: take.qty,
-      unit_cost: take.unitCost,
+    ops.push({
+      op: "insert",
+      table: "inventory_layer_allocations",
+      row: {
+        id: randomUUID(),
+        pop_id: popId,
+        layer_id: take.layerId,
+        article_id: input.articleId,
+        inventory_movement_id: outId,
+        quantity: take.qty,
+        unit_cost: take.unitCost,
+      },
     })
-    if (allocErr) {
-      await undoOut()
-      return {
-        success: false,
-        error: allocErr.message || "No se pudo imputar el FIFO.",
-        status: 500,
-      }
-    }
-    const { error: layErr } = await supabase
-      .from("inventory_cost_layers")
-      .update({ quantity_remaining: parseQty(take.remainingBefore - take.qty) })
-      .eq("id", take.layerId)
-    if (layErr) {
-      await undoOut()
-      return {
-        success: false,
-        error: layErr.message || "No se pudo actualizar la capa.",
-        status: 500,
-      }
-    }
+    ops.push({
+      op: "update",
+      table: "inventory_cost_layers",
+      id: take.layerId,
+      row: { quantity_remaining: parseQty(take.remainingBefore - take.qty) },
+    })
   }
 
-  const { data: inMov, error: inErr } = await supabase
-    .from("inventory_movements")
-    .insert({
+  ops.push({
+    op: "insert",
+    table: "inventory_movements",
+    row: {
+      id: inId,
       pop_id: popId,
       location_id: to.locationId,
       counterpart_location_id: from.locationId,
@@ -411,72 +416,64 @@ export async function transferInventoryStock(
       movement_type: "transfer_in",
       note,
       created_by: userId,
-    })
-    .select("id")
-    .single()
-  if (inErr || !inMov?.id) {
-    await undoOut()
-    return {
-      success: false,
-      error: inErr?.message || "No se pudo registrar la entrada.",
-      status: 500,
-    }
-  }
-  const inId = String(inMov.id)
+    },
+  })
 
   let holeLeft = holeQty
   for (const slice of incoming) {
     let fromSlice = slice.qty
     if (holeLeft > 1e-6) {
       const cover = Math.min(fromSlice, holeLeft)
-      const { error: coverErr } = await supabase.from("inventory_cost_layers").insert({
-        pop_id: popId,
-        location_id: to.locationId,
-        article_id: input.articleId,
-        source_movement_id: inId,
-        quantity_received: cover,
-        quantity_remaining: 0,
-        unit_cost: slice.unitCost,
-        received_at: slice.receivedAt,
-        expires_at: slice.expiresAt,
+      ops.push({
+        op: "insert",
+        table: "inventory_cost_layers",
+        row: {
+          id: randomUUID(),
+          pop_id: popId,
+          location_id: to.locationId,
+          article_id: input.articleId,
+          source_movement_id: inId,
+          quantity_received: cover,
+          quantity_remaining: 0,
+          unit_cost: slice.unitCost,
+          received_at: slice.receivedAt,
+          expires_at: slice.expiresAt,
+        },
       })
-      if (coverErr) {
-        await supabase.from("inventory_cost_layers").delete().eq("source_movement_id", inId)
-        await supabase.from("inventory_movements").delete().eq("id", inId)
-        await undoOut()
-        return {
-          success: false,
-          error: coverErr.message || "No se pudo tapar el agujero.",
-          status: 500,
-        }
-      }
       holeLeft = parseQty(holeLeft - cover)
       fromSlice = parseQty(fromSlice - cover)
     }
     if (fromSlice > 1e-6) {
-      const { error: layerErr } = await supabase.from("inventory_cost_layers").insert({
-        pop_id: popId,
-        location_id: to.locationId,
-        article_id: input.articleId,
-        source_movement_id: inId,
-        quantity_received: fromSlice,
-        quantity_remaining: fromSlice,
-        unit_cost: slice.unitCost,
-        received_at: slice.receivedAt,
-        expires_at: slice.expiresAt,
+      ops.push({
+        op: "insert",
+        table: "inventory_cost_layers",
+        row: {
+          id: randomUUID(),
+          pop_id: popId,
+          location_id: to.locationId,
+          article_id: input.articleId,
+          source_movement_id: inId,
+          quantity_received: fromSlice,
+          quantity_remaining: fromSlice,
+          unit_cost: slice.unitCost,
+          received_at: slice.receivedAt,
+          expires_at: slice.expiresAt,
+        },
       })
-      if (layerErr) {
-        await supabase.from("inventory_cost_layers").delete().eq("source_movement_id", inId)
-        await supabase.from("inventory_movements").delete().eq("id", inId)
-        await undoOut()
-        return {
-          success: false,
-          error: layerErr.message || "No se pudo crear la capa de destino.",
-          status: 500,
-        }
-      }
     }
   }
 
+  const applied = await applyWithAudit(supabase, {
+    kind: "inventory.transfer",
+    ctx: audit,
+    popId,
+    resourceId: transferGroupId,
+    previous: null,
+    next: { from: from.locationId, to: to.locationId, quantity: qtyAbs },
+    ops,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
+  }
   return { success: true }
 }

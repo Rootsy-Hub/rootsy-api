@@ -101,6 +101,7 @@ export const deleteRecipeBodySchema = z.object({
 export type IngredientInput = z.infer<typeof ingredientInputSchema>
 export type ListPriceAmountInput = z.infer<typeof listPriceAmountSchema>
 export type UpsertRecipeBody = z.infer<typeof upsertRecipeBodySchema>
+export type PatchRecipeBody = Partial<UpsertRecipeBody>
 
 export type RecipeListPriceRow = {
   listId: string

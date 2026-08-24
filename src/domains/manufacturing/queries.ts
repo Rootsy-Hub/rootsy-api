@@ -57,17 +57,27 @@ function mapRunRow(
   }
 }
 
+function escapeIlikeToken(raw: string): string {
+  return raw.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_")
+}
+
 export async function listManufacturableRecipes(
   supabase: SupabaseClient,
   popId: string,
+  input: { search?: string; limit?: number } = {},
 ): Promise<
   | { success: true; recipes: ManufacturableRecipe[] }
   | { success: false; error: string; status: 500 }
 > {
+  const search = input.search?.trim() ?? ""
+  if (input.search != null && search.length < 1) {
+    return { success: true, recipes: [] }
+  }
+
   const location = await ensurePopDefaultInventoryLocationId(supabase, popId)
   const locationId = location.success ? location.locationId : null
 
-  const { data: recipeRows, error: recipeErr } = await supabase
+  let recipeQuery = supabase
     .from("recipes")
     .select(
       `
@@ -80,13 +90,20 @@ export async function listManufacturableRecipes(
     )
     .eq("pop_id", popId)
     .eq("is_active", true)
-    .not("output_article_id", "is", null)
     .order("name", { ascending: true })
+  if (search) {
+    recipeQuery = recipeQuery.ilike("name", `%${escapeIlikeToken(search)}%`)
+  }
+  if (input.limit && input.limit > 0) {
+    recipeQuery = recipeQuery.limit(input.limit)
+  }
+
+  const { data: recipeRows, error: recipeErr } = await recipeQuery
   if (recipeErr) {
     return { success: false, error: recipeErr.message, status: 500 }
   }
 
-  const recipes = (recipeRows ?? []).filter((row) => row.output_article_id)
+  const recipes = recipeRows ?? []
   if (recipes.length === 0) {
     return { success: true, recipes: [] }
   }
@@ -102,6 +119,7 @@ export async function listManufacturableRecipes(
       articles (
         id,
         name,
+        item_kind,
         unit_of_measure,
         default_waste_pct
       )
@@ -154,9 +172,17 @@ export async function listManufacturableRecipes(
       art.default_waste_pct != null && Number.isFinite(Number(art.default_waste_pct))
         ? Number(art.default_waste_pct)
         : null
+    const rawKind = String(art.item_kind ?? "raw_material")
+    const itemKind =
+      rawKind === "merchandise" ||
+      rawKind === "raw_material" ||
+      rawKind === "supply"
+        ? rawKind
+        : "raw_material"
     const preview: ManufacturingIngredientPreview = {
       articleId,
       articleName: String(art.name ?? ""),
+      itemKind,
       unitOfMeasure: String(art.unit_of_measure ?? ""),
       quantityPerUnit,
       wastePct,
@@ -218,14 +244,10 @@ export async function listManufacturingWorkspace(
   if (from) query = query.gte("produced_at", from)
   if (to) query = query.lte("produced_at", to)
 
-  const [runsRes, recipesRes] = await Promise.all([
-    query,
-    listManufacturableRecipes(supabase, popId),
-  ])
+  const runsRes = await query
   if (runsRes.error) {
     return { success: false, error: runsRes.error.message, status: 500 }
   }
-  if (!recipesRes.success) return recipesRes
 
   const namesByUserId = new Map<string, string>()
   const userIds = [
@@ -252,7 +274,7 @@ export async function listManufacturingWorkspace(
       runs: (runsRes.data ?? []).map((row) =>
         mapRunRow(row as Record<string, unknown>, namesByUserId),
       ),
-      recipes: recipesRes.recipes,
+      recipes: [],
       canCreate: caps.canCreate,
     },
   }

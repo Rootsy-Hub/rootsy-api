@@ -1,6 +1,12 @@
 import type { SupabaseClient } from "@supabase/supabase-js"
-import { parseMoney, roundMoney } from "../reports/money.js"
+import { roundMoney } from "../reports/money.js"
 import { resolveTreasuryAccountLedgerAccountId } from "./chart.js"
+import {
+  nextAccountingEntryNumber,
+  postedAccountingEntryOps,
+  type LedgerLineOp,
+} from "../../audit/ledgerOps.js"
+import type { AuditOp } from "../../audit/types.js"
 
 const CHART_GASTOS_GENERALES = ["6.2.1.99", "6.2.1.02", "6.2.1.01"] as const
 const CHART_GASTOS_FINANCIEROS = ["6.3.1.01", ...CHART_GASTOS_GENERALES] as const
@@ -32,27 +38,12 @@ async function nextEntryNumber(
   supabase: SupabaseClient,
   popId: string,
 ): Promise<number> {
-  const { data: maxRow } = await supabase
-    .from("accounting_entries")
-    .select("entry_number")
-    .eq("pop_id", popId)
-    .order("entry_number", { ascending: false })
-    .limit(1)
-    .maybeSingle()
-  return maxRow?.entry_number != null && Number.isFinite(Number(maxRow.entry_number))
-    ? Number(maxRow.entry_number) + 1
-    : 1
+  return nextAccountingEntryNumber(supabase, popId)
 }
 
-type LedgerLine = {
-  account_id: string
-  debit_amount: number
-  credit_amount: number
-  description: string
-  line_order: number
-}
+type LedgerLine = LedgerLineOp
 
-export async function postBalancedEntry(
+export async function buildBalancedEntryOps(
   supabase: SupabaseClient,
   args: {
     popId: string
@@ -63,7 +54,7 @@ export async function postBalancedEntry(
     description: string
     lines: LedgerLine[]
   },
-): Promise<{ success: true; entryId: string } | { success: false; error: string }> {
+): Promise<{ success: true; entryId: string; ops: AuditOp[] } | { success: false; error: string }> {
   const { popId, userId, entryDate, sourceType, sourceId, description, lines } =
     args
 
@@ -82,116 +73,59 @@ export async function postBalancedEntry(
   }
 
   const nextNum = await nextEntryNumber(supabase, popId)
-  const { data: entIns, error: entErr } = await supabase
-    .from("accounting_entries")
-    .insert({
-      pop_id: popId,
-      entry_number: nextNum,
-      entry_date: entryDate,
-      source_type: sourceType,
-      source_id: sourceId,
-      description,
-      status: "draft",
-      created_by: userId,
-    })
-    .select("id")
-    .single()
-
-  if (entErr || !entIns?.id) {
-    return { success: false, error: entErr?.message || "No se pudo crear el asiento." }
-  }
-  const entryId = String(entIns.id)
-
-  const { error: linesErr } = await supabase
-    .from("accounting_entry_lines")
-    .insert(lines.map((line) => ({ ...line, entry_id: entryId })))
-
-  if (linesErr) {
-    await supabase
-      .from("accounting_entries")
-      .update({ status: "cancelled", updated_at: new Date().toISOString() })
-      .eq("id", entryId)
-    return {
-      success: false,
-      error: linesErr.message || "No se pudieron crear las líneas.",
-    }
-  }
-
-  const { error: postErr } = await supabase
-    .from("accounting_entries")
-    .update({
-      status: "posted",
-      posted_at: new Date().toISOString(),
-      posted_by: userId,
-    })
-    .eq("id", entryId)
-
-  if (postErr) {
-    await supabase
-      .from("accounting_entries")
-      .update({ status: "cancelled", updated_at: new Date().toISOString() })
-      .eq("id", entryId)
-    return {
-      success: false,
-      error: postErr.message || "No se pudo registrar el asiento.",
-    }
-  }
-
-  return { success: true, entryId }
+  const ledger = postedAccountingEntryOps({
+    popId,
+    userId,
+    entryNumber: nextNum,
+    entryDate,
+    sourceType,
+    sourceId,
+    description,
+    lines,
+  })
+  return { success: true, entryId: ledger.entryId, ops: ledger.ops }
 }
 
-export async function postTreasurySettlementLedger(
+export async function buildTreasurySettlementLedgerOps(
   supabase: SupabaseClient,
-  args: { popId: string; userId: string; settlementId: string },
-): Promise<{ success: true } | { success: false; error: string }> {
+  args: {
+    popId: string
+    userId: string
+    settlementId: string
+    principal: number
+    adjustment: number
+    settledAt: string
+    cardTreasuryAccountId: string
+    fundingTreasuryAccountId: string
+  },
+): Promise<{ success: true; entryId: string; ops: AuditOp[] } | { success: false; error: string }> {
   const { popId, userId, settlementId } = args
-
-  const { data: row, error: rowErr } = await supabase
-    .from("treasury_settlements")
-    .select(
-      "id, amount, principal_amount, adjustment_amount, settled_at, notes, card_treasury_account_id, funding_treasury_account_id, accounting_entry_id",
-    )
-    .eq("id", settlementId)
-    .eq("pop_id", popId)
-    .maybeSingle()
-
-  if (rowErr || !row) {
-    return { success: false, error: "Liquidación de tesorería no encontrada." }
-  }
-  if (row.accounting_entry_id) return { success: true }
-
-  const principal = roundMoney(parseMoney(row.principal_amount ?? row.amount))
-  const adjustment = roundMoney(parseMoney(row.adjustment_amount ?? 0))
+  const principal = roundMoney(args.principal)
+  const adjustment = roundMoney(args.adjustment)
   const bankOut = roundMoney(principal + adjustment)
   if (!(principal > 0)) {
     return { success: false, error: "Importe de liquidación inválido." }
   }
 
-  const entryDate = String(row.settled_at ?? "").slice(0, 10)
-  const cardTaId =
-    row.card_treasury_account_id != null
-      ? String(row.card_treasury_account_id)
-      : null
-  const fundTaId =
-    row.funding_treasury_account_id != null
-      ? String(row.funding_treasury_account_id)
-      : null
+  const entryDate = String(args.settledAt ?? "").slice(0, 10)
+  const cardTaId = args.cardTreasuryAccountId
+  const fundTaId = args.fundingTreasuryAccountId
 
   let cardLabel = "Tarjeta"
-  if (cardTaId) {
-    const { data: cardTa } = await supabase
-      .from("treasury_accounts")
-      .select("name")
-      .eq("id", cardTaId)
-      .eq("pop_id", popId)
-      .maybeSingle()
-    cardLabel = String(cardTa?.name ?? "Tarjeta").trim()
-  }
+  const { data: cardTa } = await supabase
+    .from("treasury_accounts")
+    .select("name")
+    .eq("id", cardTaId)
+    .eq("pop_id", popId)
+    .maybeSingle()
+  cardLabel = String(cardTa?.name ?? "Tarjeta").trim()
   const entryDescription = `Pago resumen tarjeta — ${cardLabel}`
 
-  let liabilityAccountId = cardTaId
-    ? await resolveTreasuryAccountLedgerAccountId(supabase, popId, cardTaId)
-    : null
+  let liabilityAccountId = await resolveTreasuryAccountLedgerAccountId(
+    supabase,
+    popId,
+    cardTaId,
+  )
   if (!liabilityAccountId) {
     liabilityAccountId = await resolveAccountId(
       supabase,
@@ -206,9 +140,11 @@ export async function postTreasurySettlementLedger(
     }
   }
 
-  const bankAccountId = fundTaId
-    ? await resolveTreasuryAccountLedgerAccountId(supabase, popId, fundTaId)
-    : null
+  const bankAccountId = await resolveTreasuryAccountLedgerAccountId(
+    supabase,
+    popId,
+    fundTaId,
+  )
   if (!bankAccountId) {
     return {
       success: false,
@@ -257,7 +193,7 @@ export async function postTreasurySettlementLedger(
     line_order: lines.length + 1,
   })
 
-  const posted = await postBalancedEntry(supabase, {
+  return buildBalancedEntryOps(supabase, {
     popId,
     userId,
     entryDate,
@@ -266,54 +202,33 @@ export async function postTreasurySettlementLedger(
     description: entryDescription,
     lines,
   })
-  if (!posted.success) return posted
-
-  const { error: linkErr } = await supabase
-    .from("treasury_settlements")
-    .update({ accounting_entry_id: posted.entryId })
-    .eq("id", settlementId)
-    .eq("pop_id", popId)
-  if (linkErr) {
-    return {
-      success: false,
-      error:
-        linkErr.message ||
-        "El asiento quedó registrado pero no se pudo vincular a la liquidación.",
-    }
-  }
-  return { success: true }
 }
 
-export async function postPosAcreditationLedger(
+export async function buildPosAcreditationLedgerOps(
   supabase: SupabaseClient,
-  args: { popId: string; userId: string; acreditationId: string },
-): Promise<{ success: true } | { success: false; error: string }> {
+  args: {
+    popId: string
+    userId: string
+    acreditationId: string
+    principal: number
+    adjustment: number
+    creditedAt: string
+    notes: string
+    posTreasuryAccountId: string
+    motherTreasuryAccountId: string
+  },
+): Promise<{ success: true; entryId: string; ops: AuditOp[] } | { success: false; error: string }> {
   const { popId, userId, acreditationId } = args
-
-  const { data: row, error: rowErr } = await supabase
-    .from("treasury_pos_acreditations")
-    .select(
-      "id, principal_amount, adjustment_amount, credited_at, notes, pos_treasury_account_id, mother_treasury_account_id, accounting_entry_id",
-    )
-    .eq("id", acreditationId)
-    .eq("pop_id", popId)
-    .maybeSingle()
-
-  if (rowErr || !row) {
-    return { success: false, error: "Acreditación POS no encontrada." }
-  }
-  if (row.accounting_entry_id) return { success: true }
-
-  const principal = roundMoney(parseMoney(row.principal_amount))
-  const adjustment = roundMoney(parseMoney(row.adjustment_amount ?? 0))
+  const principal = roundMoney(args.principal)
+  const adjustment = roundMoney(args.adjustment)
   const posCredit = roundMoney(principal + adjustment)
   if (!(principal > 0)) {
     return { success: false, error: "Importe de acreditación inválido." }
   }
 
-  const entryDate = String(row.credited_at ?? "").slice(0, 10)
-  const posTaId = String(row.pos_treasury_account_id)
-  const motherTaId = String(row.mother_treasury_account_id)
+  const entryDate = String(args.creditedAt ?? "").slice(0, 10)
+  const posTaId = args.posTreasuryAccountId
+  const motherTaId = args.motherTreasuryAccountId
 
   const { data: posTa } = await supabase
     .from("treasury_accounts")
@@ -322,7 +237,7 @@ export async function postPosAcreditationLedger(
     .eq("pop_id", popId)
     .maybeSingle()
   const posName = String(posTa?.name ?? "POS").trim()
-  const notes = String(row.notes ?? "").trim()
+  const notes = args.notes.trim()
   const entryDescription = notes
     ? `Acreditación POS — ${posName} (${notes})`
     : `Acreditación POS — ${posName}`
@@ -383,7 +298,7 @@ export async function postPosAcreditationLedger(
     line_order: lines.length + 1,
   })
 
-  const posted = await postBalancedEntry(supabase, {
+  return buildBalancedEntryOps(supabase, {
     popId,
     userId,
     entryDate,
@@ -392,20 +307,4 @@ export async function postPosAcreditationLedger(
     description: entryDescription,
     lines,
   })
-  if (!posted.success) return posted
-
-  const { error: linkErr } = await supabase
-    .from("treasury_pos_acreditations")
-    .update({ accounting_entry_id: posted.entryId })
-    .eq("id", acreditationId)
-    .eq("pop_id", popId)
-  if (linkErr) {
-    return {
-      success: false,
-      error:
-        linkErr.message ||
-        "El asiento quedó registrado pero no se pudo vincular a la acreditación.",
-    }
-  }
-  return { success: true }
 }

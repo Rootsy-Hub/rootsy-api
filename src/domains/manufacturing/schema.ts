@@ -7,11 +7,21 @@ export const listManufacturingQuerySchema = z.object({
   to: z.string().optional().default(""),
 })
 
+export const searchManufacturingRecipesQuerySchema = z.object({
+  q: z.string().optional().default(""),
+})
+
+export const MANUFACTURING_RECIPE_SEARCH_LIMIT = 8
+
 export const createManufacturingRunBodySchema = z.object({
   recipeId: z.string().uuid(),
   quantity: z.number(),
   producedAt: z.string(),
   expiresAt: z.string().nullable().optional(),
+  outputArticleId: z
+    .union([z.string().uuid(), z.literal(""), z.null()])
+    .optional()
+    .transform((v) => (v && v.length > 0 ? v : null)),
   notes: z.string().optional().default(""),
 })
 
@@ -38,6 +48,7 @@ export function parseIsoDate(raw: unknown): string | null {
 export type ManufacturingIngredientPreview = {
   articleId: string
   articleName: string
+  itemKind: "merchandise" | "raw_material" | "supply"
   unitOfMeasure: string
   quantityPerUnit: number
   wastePct: number | null

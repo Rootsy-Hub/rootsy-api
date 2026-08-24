@@ -1,9 +1,18 @@
+import { randomUUID } from "node:crypto"
 import type { SupabaseClient } from "@supabase/supabase-js"
+import {
+  auditedDelete,
+  auditedInsert,
+  auditedUpdate,
+} from "../../audit/simpleWrite.js"
+import type { MutationAuditCtx } from "../../audit/types.js"
 import { parseMoney } from "../reports/money.js"
+import { mergePatch } from "../../lib/patchBody.js"
 import type {
   AddMovementBody,
   CreateCashRegisterBody,
   OpenSessionBody,
+  PatchCashRegisterBody,
   UpdateCashRegisterBody,
 } from "./schema.js"
 import { computeCashBalance } from "./sessionCash.js"
@@ -71,6 +80,7 @@ export async function createCashRegister(
   supabase: SupabaseClient,
   popId: string,
   input: CreateCashRegisterBody,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const cashTa = await resolveCashTreasuryAccountId(
     supabase,
@@ -85,34 +95,74 @@ export async function createCashRegister(
   )
   if (!salePoint.success) return salePoint
 
-  const { data: inserted, error } = await supabase
-    .from("cash_registers")
-    .insert({
-      pop_id: popId,
-      name: input.name,
-      sort_order: input.sortOrder,
-      is_active: true,
-      cash_treasury_account_id: cashTa.id,
-      arca_sale_point_id: salePoint.id,
-    })
-    .select("id")
-    .single()
-  if (error || !inserted?.id) {
-    return {
-      success: false,
-      error: error?.message || "No se pudo crear la caja.",
-      status: 500,
-    }
+  const id = randomUUID()
+  const row = {
+    id,
+    pop_id: popId,
+    name: input.name,
+    sort_order: input.sortOrder,
+    is_active: true,
+    cash_treasury_account_id: cashTa.id,
+    arca_sale_point_id: salePoint.id,
   }
-  return { success: true, registerId: String(inserted.id) }
+  const applied = await auditedInsert(supabase, {
+    kind: "cash_registers.create",
+    table: "cash_registers",
+    row,
+    ctx: audit,
+    popId,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
+  }
+  return { success: true, registerId: id }
+}
+
+function cashRegisterToUpdateBody(row: {
+  name: string | null
+  sort_order: number | null
+  is_active: boolean | null
+  cash_treasury_account_id: string | null
+  arca_sale_point_id: string | null
+}): UpdateCashRegisterBody {
+  return {
+    name: String(row.name ?? ""),
+    sortOrder: Number(row.sort_order ?? 0) || 0,
+    isActive: Boolean(row.is_active),
+    cashTreasuryAccountId: String(row.cash_treasury_account_id ?? ""),
+    arcaSalePointId: row.arca_sale_point_id
+      ? String(row.arca_sale_point_id)
+      : null,
+  }
 }
 
 export async function updateCashRegister(
   supabase: SupabaseClient,
   popId: string,
   registerId: string,
-  input: UpdateCashRegisterBody,
+  patch: PatchCashRegisterBody,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
+  const { data: current, error: fetchError } = await supabase
+    .from("cash_registers")
+    .select(
+      "name, sort_order, is_active, cash_treasury_account_id, arca_sale_point_id",
+    )
+    .eq("id", registerId)
+    .eq("pop_id", popId)
+    .maybeSingle()
+  if (fetchError) {
+    return {
+      success: false,
+      error: fetchError.message || "No se pudo guardar la caja.",
+      status: 500,
+    }
+  }
+  if (!current) {
+    return { success: false, error: "Caja no encontrada.", status: 404 }
+  }
+  const input = mergePatch(cashRegisterToUpdateBody(current), patch)
+
   const cashTa = await resolveCashTreasuryAccountId(
     supabase,
     popId,
@@ -126,28 +176,25 @@ export async function updateCashRegister(
   )
   if (!salePoint.success) return salePoint
 
-  const { data, error } = await supabase
-    .from("cash_registers")
-    .update({
-      name: input.name,
-      sort_order: input.sortOrder,
-      is_active: input.isActive,
-      cash_treasury_account_id: cashTa.id,
-      arca_sale_point_id: salePoint.id,
-    })
-    .eq("id", registerId)
-    .eq("pop_id", popId)
-    .select("id")
-    .maybeSingle()
-  if (error) {
-    return {
-      success: false,
-      error: error.message || "No se pudo guardar la caja.",
-      status: 500,
-    }
+  const updateRow = {
+    name: input.name,
+    sort_order: input.sortOrder,
+    is_active: input.isActive,
+    cash_treasury_account_id: cashTa.id,
+    arca_sale_point_id: salePoint.id,
   }
-  if (!data?.id) {
-    return { success: false, error: "Caja no encontrada.", status: 404 }
+  const applied = await auditedUpdate(supabase, {
+    kind: "cash_registers.patch",
+    table: "cash_registers",
+    id: registerId,
+    row: updateRow,
+    ctx: audit,
+    popId,
+    previous: current,
+    next: { ...current, ...updateRow },
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
   return { success: true }
 }
@@ -156,6 +203,7 @@ export async function deleteCashRegister(
   supabase: SupabaseClient,
   popId: string,
   registerId: string,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const { data: open } = await supabase
     .from("cash_register_sessions")
@@ -171,22 +219,25 @@ export async function deleteCashRegister(
       status: 409,
     }
   }
-  const { data, error } = await supabase
+  const { data: existing } = await supabase
     .from("cash_registers")
-    .delete()
+    .select("id, name")
     .eq("id", registerId)
     .eq("pop_id", popId)
-    .select("id")
     .maybeSingle()
-  if (error) {
-    return {
-      success: false,
-      error: error.message || "No se pudo eliminar la caja.",
-      status: 500,
-    }
-  }
-  if (!data?.id) {
+  if (!existing?.id) {
     return { success: false, error: "Caja no encontrada.", status: 404 }
+  }
+  const applied = await auditedDelete(supabase, {
+    kind: "cash_registers.delete",
+    table: "cash_registers",
+    id: registerId,
+    ctx: audit,
+    popId,
+    previous: existing,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
   return { success: true }
 }
@@ -197,6 +248,7 @@ export async function openCashSession(
   registerId: string,
   userId: string,
   input: OpenSessionBody,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const { data: regRow, error: regErr } = await supabase
     .from("cash_registers")
@@ -231,20 +283,25 @@ export async function openCashSession(
   }
 
   const noteTrim = input.note?.trim() ?? ""
-  const { error } = await supabase.from("cash_register_sessions").insert({
+  const id = randomUUID()
+  const row = {
+    id,
     pop_id: popId,
     cash_register_id: registerId,
     status: "open",
     opened_by: userId,
     opening_cash: parseMoney(input.openingCash),
     note: noteTrim.length > 0 ? noteTrim : null,
+  }
+  const applied = await auditedInsert(supabase, {
+    kind: "cash_registers.session.open",
+    table: "cash_register_sessions",
+    row,
+    ctx: audit,
+    popId,
   })
-  if (error) {
-    return {
-      success: false,
-      error: error.message || "No se pudo abrir el turno.",
-      status: 500,
-    }
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
   return { success: true }
 }
@@ -255,6 +312,7 @@ export async function addCashMovement(
   sessionId: string,
   userId: string,
   input: AddMovementBody,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const amount = parseMoney(input.amount)
   const { data: sess } = await supabase
@@ -277,20 +335,25 @@ export async function addCashMovement(
     }
   }
   const note = input.note?.trim() ?? ""
-  const { error } = await supabase.from("cash_register_movements").insert({
+  const id = randomUUID()
+  const row = {
+    id,
     pop_id: popId,
     session_id: sessionId,
     kind: input.kind,
     amount,
     note: note.length > 0 ? note : null,
     created_by: userId,
+  }
+  const applied = await auditedInsert(supabase, {
+    kind: "cash_registers.movement",
+    table: "cash_register_movements",
+    row,
+    ctx: audit,
+    popId,
   })
-  if (error) {
-    return {
-      success: false,
-      error: error.message || "No se pudo guardar el movimiento.",
-      status: 500,
-    }
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
   return { success: true }
 }

@@ -1,4 +1,7 @@
+import { randomUUID } from "node:crypto"
 import type { SupabaseClient } from "@supabase/supabase-js"
+import { applyWithAudit } from "../../audit/apply.js"
+import type { AuditOp, MutationAuditCtx } from "../../audit/types.js"
 import { applyInventoryFefoOrder, parseInventoryExpiresAt } from "../inventory/expiry.js"
 import {
   ensurePopDefaultInventoryLocationId,
@@ -18,12 +21,6 @@ type FifoAllocationPlan = {
   qty: number
   unitCost: number
   remainingBefore: number
-}
-
-type AppliedMovement = {
-  movementId: string
-  allocations: FifoAllocationPlan[]
-  inbound: boolean
 }
 
 function articleCostError(articleName: string): string {
@@ -104,36 +101,12 @@ async function planFefoConsume(
   }
 }
 
-async function rollbackMovements(
-  supabase: SupabaseClient,
-  applied: AppliedMovement[],
-) {
-  for (const item of [...applied].reverse()) {
-    if (item.inbound) {
-      await supabase
-        .from("inventory_cost_layers")
-        .delete()
-        .eq("source_movement_id", item.movementId)
-    }
-    for (const alloc of item.allocations) {
-      await supabase
-        .from("inventory_cost_layers")
-        .update({ quantity_remaining: alloc.remainingBefore })
-        .eq("id", alloc.layerId)
-    }
-    await supabase
-      .from("inventory_layer_allocations")
-      .delete()
-      .eq("inventory_movement_id", item.movementId)
-    await supabase.from("inventory_movements").delete().eq("id", item.movementId)
-  }
-}
-
 export async function createManufacturingRun(
   supabase: SupabaseClient,
   popId: string,
   userId: string,
   input: CreateManufacturingRunBody,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const quantity = Number(input.quantity)
   if (!Number.isFinite(quantity) || quantity <= 0 || quantity > 10000) {
@@ -164,11 +137,14 @@ export async function createManufacturingRun(
   if (!recipe.is_active) {
     return { success: false, error: "Esa receta está inactiva.", status: 400 }
   }
-  if (!recipe.output_article_id) {
+
+  const requestedOutputId =
+    input.outputArticleId?.trim() ||
+    (recipe.output_article_id ? String(recipe.output_article_id) : "")
+  if (!requestedOutputId) {
     return {
       success: false,
-      error:
-        "Esta receta no declara qué artículo produce. Completalo en Recetas.",
+      error: "Elegí el artículo que entra al depósito.",
       status: 400,
     }
   }
@@ -176,7 +152,7 @@ export async function createManufacturingRun(
   const { data: outputArt, error: outErr } = await supabase
     .from("articles")
     .select("id, name, item_kind, is_active")
-    .eq("id", recipe.output_article_id)
+    .eq("id", requestedOutputId)
     .eq("pop_id", popId)
     .maybeSingle()
   if (outErr || !outputArt?.id) {
@@ -190,6 +166,14 @@ export async function createManufacturingRun(
     return {
       success: false,
       error: "El artículo producido está inactivo.",
+      status: 400,
+    }
+  }
+  const outputKind = String(outputArt.item_kind ?? "")
+  if (outputKind !== "merchandise" && outputKind !== "raw_material") {
+    return {
+      success: false,
+      error: "El artículo que produce tiene que ser mercadería o materia prima.",
       status: 400,
     }
   }
@@ -255,6 +239,14 @@ export async function createManufacturingRun(
       status: 400,
     }
   }
+  if (lines.some((line) => line.articleId === String(outputArt.id))) {
+    return {
+      success: false,
+      error:
+        "El artículo que produce no puede ser un insumo de la misma receta.",
+      status: 400,
+    }
+  }
 
   const location = await ensurePopDefaultInventoryLocationId(supabase, popId)
   if (!location.success) {
@@ -315,10 +307,23 @@ export async function createManufacturingRun(
   }
 
   const unitCost = quantity > 0 ? roundMoney(totalCost / quantity) : 0
+  const runId = randomUUID()
+  const ops: AuditOp[] = []
 
-  const { data: created, error: createErr } = await supabase
-    .from("pop_manufacturing_runs")
-    .insert({
+  if (!recipe.output_article_id) {
+    ops.push({
+      op: "update",
+      table: "recipes",
+      id: String(recipe.id),
+      row: { output_article_id: String(outputArt.id) },
+    })
+  }
+
+  ops.push({
+    op: "insert",
+    table: "pop_manufacturing_runs",
+    row: {
+      id: runId,
       pop_id: popId,
       recipe_id: input.recipeId,
       output_article_id: String(outputArt.id),
@@ -330,29 +335,17 @@ export async function createManufacturingRun(
       notes: notes || null,
       produced_at: producedAt,
       produced_by: userId,
-    })
-    .select("id")
-    .single()
-  if (createErr || !created?.id) {
-    return {
-      success: false,
-      error: createErr?.message || "No se pudo guardar la producción.",
-      status: 500,
-    }
-  }
-  const runId = String(created.id)
-  const applied: AppliedMovement[] = []
+    },
+  })
 
-  async function fail(error: string, status: 400 | 500 = 500): Promise<MutateResult> {
-    await rollbackMovements(supabase, applied)
-    await supabase.from("pop_manufacturing_runs").delete().eq("id", runId)
-    return { success: false, error, status }
-  }
-
+  const consumeNote = `Fabricar — ${recipe.name}`
   for (const plan of plans) {
-    const { data: movIns, error: movErr } = await supabase
-      .from("inventory_movements")
-      .insert({
+    const movementId = randomUUID()
+    ops.push({
+      op: "insert",
+      table: "inventory_movements",
+      row: {
+        id: movementId,
         pop_id: popId,
         location_id: location.locationId,
         article_id: plan.articleId,
@@ -360,54 +353,41 @@ export async function createManufacturingRun(
         movement_type: "manufacturing_consume",
         reference_type: "manufacturing_run",
         reference_id: runId,
-        note: `Fabricar — ${recipe.name}`,
+        note: consumeNote,
         created_by: userId,
-      })
-      .select("id")
-      .single()
-    if (movErr || !movIns?.id) {
-      return fail(movErr?.message || "No se pudo descontar un insumo.")
-    }
-    const movementId = String(movIns.id)
-
+      },
+    })
     for (const alloc of plan.allocations) {
-      const { error: allocErr } = await supabase
-        .from("inventory_layer_allocations")
-        .insert({
+      ops.push({
+        op: "insert",
+        table: "inventory_layer_allocations",
+        row: {
+          id: randomUUID(),
           pop_id: popId,
           layer_id: alloc.layerId,
           article_id: plan.articleId,
           inventory_movement_id: movementId,
           quantity: alloc.qty,
           unit_cost: alloc.unitCost,
-        })
-      if (allocErr) {
-        await supabase.from("inventory_movements").delete().eq("id", movementId)
-        return fail(allocErr.message || "No se pudo imputar el costo del insumo.")
-      }
+        },
+      })
     }
     for (const alloc of plan.allocations) {
-      const { error: layErr } = await supabase
-        .from("inventory_cost_layers")
-        .update({
-          quantity_remaining: parseQty(alloc.remainingBefore - alloc.qty),
-        })
-        .eq("id", alloc.layerId)
-      if (layErr) {
-        await supabase.from("inventory_movements").delete().eq("id", movementId)
-        return fail(layErr.message || "No se pudo actualizar la capa del insumo.")
-      }
+      ops.push({
+        op: "update",
+        table: "inventory_cost_layers",
+        id: alloc.layerId,
+        row: { quantity_remaining: parseQty(alloc.remainingBefore - alloc.qty) },
+      })
     }
-    applied.push({
-      movementId,
-      allocations: plan.allocations,
-      inbound: false,
-    })
   }
 
-  const { data: outMov, error: outMovErr } = await supabase
-    .from("inventory_movements")
-    .insert({
+  const outputMovementId = randomUUID()
+  ops.push({
+    op: "insert",
+    table: "inventory_movements",
+    row: {
+      id: outputMovementId,
       pop_id: popId,
       location_id: location.locationId,
       article_id: String(outputArt.id),
@@ -415,35 +395,43 @@ export async function createManufacturingRun(
       movement_type: "manufacturing_output",
       reference_type: "manufacturing_run",
       reference_id: runId,
-      note: `Fabricar — ${recipe.name}`,
+      note: consumeNote,
       created_by: userId,
-    })
-    .select("id")
-    .single()
-  if (outMovErr || !outMov?.id) {
-    return fail(outMovErr?.message || "No se pudo ingresar el artículo producido.")
-  }
-  const outputMovementId = String(outMov.id)
-
-  const { error: layerErr } = await supabase.from("inventory_cost_layers").insert({
-    pop_id: popId,
-    location_id: location.locationId,
-    article_id: String(outputArt.id),
-    source_movement_id: outputMovementId,
-    quantity_received: quantity,
-    quantity_remaining: quantity,
-    unit_cost: unitCost,
-    expires_at: expiresAt,
+    },
   })
-  if (layerErr) {
-    await supabase.from("inventory_movements").delete().eq("id", outputMovementId)
-    return fail(layerErr.message || "No se pudo registrar la capa del producto.")
-  }
-  applied.push({
-    movementId: outputMovementId,
-    allocations: [],
-    inbound: true,
+  ops.push({
+    op: "insert",
+    table: "inventory_cost_layers",
+    row: {
+      id: randomUUID(),
+      pop_id: popId,
+      location_id: location.locationId,
+      article_id: String(outputArt.id),
+      source_movement_id: outputMovementId,
+      quantity_received: quantity,
+      quantity_remaining: quantity,
+      unit_cost: unitCost,
+      expires_at: expiresAt,
+    },
   })
 
+  const applied = await applyWithAudit(supabase, {
+    kind: "manufacturing.run",
+    ctx: audit,
+    popId,
+    resourceId: runId,
+    previous: null,
+    next: {
+      runId,
+      recipeId: input.recipeId,
+      quantity,
+      unitCost,
+      totalCost,
+    },
+    ops,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
+  }
   return { success: true, id: runId }
 }

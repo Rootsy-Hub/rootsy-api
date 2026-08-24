@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import { z } from "zod"
 import type { SidecarEnv } from "../../sidecar/pop.js"
 import { requireAnyPermission } from "../../sidecar/permissions.js"
+import { requireMutationPermission } from "../../sidecar/mutationPermission.js"
 import {
   CLIENT_CREATE,
   CLIENT_DELETE,
@@ -10,6 +11,7 @@ import {
 } from "./allowlist.js"
 import { createClient, deleteClient, updateClient } from "./mutations.js"
 import { listClients } from "./queries.js"
+import { parsePatchBody } from "../../lib/patchBody.js"
 import {
   deleteClientBodySchema,
   listClientsQuerySchema,
@@ -56,7 +58,7 @@ clientRoutes.get("/", requireAnyPermission(CLIENT_READ), async (c) => {
   return c.json(result)
 })
 
-clientRoutes.post("/", requireAnyPermission(CLIENT_CREATE), async (c) => {
+clientRoutes.post("/", requireMutationPermission(CLIENT_CREATE), async (c) => {
   const body = upsertClientBodySchema.safeParse(
     await c.req.json().catch(() => null),
   )
@@ -70,6 +72,7 @@ clientRoutes.post("/", requireAnyPermission(CLIENT_CREATE), async (c) => {
     c.get("supabase"),
     c.get("sidecar").popId,
     body.data,
+    c.get("mutationAudit"),
   )
   if (!result.success) return c.json(result, result.status)
   return c.json(result, 201)
@@ -77,29 +80,25 @@ clientRoutes.post("/", requireAnyPermission(CLIENT_CREATE), async (c) => {
 
 clientRoutes.patch(
   "/:clientId",
-  requireAnyPermission(CLIENT_UPDATE),
+  requireMutationPermission(CLIENT_UPDATE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("clientId"))
     if (!id.success) {
       return c.json({ success: false, error: "clientId inválido" }, 400)
     }
-    const body = upsertClientBodySchema.safeParse(
+    const body = parsePatchBody(
+      upsertClientBodySchema,
       await c.req.json().catch(() => null),
     )
     if (!body.success) {
-      return c.json(
-        {
-          success: false,
-          error: body.error.issues[0]?.message ?? "Body inválido",
-        },
-        400,
-      )
+      return c.json({ success: false, error: body.error }, 400)
     }
     const result = await updateClient(
       c.get("supabase"),
       c.get("sidecar").popId,
       id.data,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -108,7 +107,7 @@ clientRoutes.patch(
 
 clientRoutes.delete(
   "/:clientId",
-  requireAnyPermission(CLIENT_DELETE),
+  requireMutationPermission(CLIENT_DELETE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("clientId"))
     if (!id.success) {
@@ -131,6 +130,7 @@ clientRoutes.delete(
       c.get("sidecar").popId,
       id.data,
       body.data.confirmationTyped,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)

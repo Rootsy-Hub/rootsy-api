@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import { z } from "zod"
 import type { SidecarEnv } from "../../sidecar/pop.js"
 import { requireAnyPermission } from "../../sidecar/permissions.js"
+import { requireMutationPermission } from "../../sidecar/mutationPermission.js"
 import {
   ARTICLE_UPDATE,
   INVENTORY_CREATE,
@@ -227,7 +228,7 @@ inventoryRoutes.get(
 
 inventoryRoutes.post(
   "/adjustments",
-  requireAnyPermission(INVENTORY_CREATE),
+  requireMutationPermission(INVENTORY_CREATE),
   async (c) => {
     const body = createAdjustmentBodySchema.safeParse(
       await c.req.json().catch(() => null),
@@ -248,6 +249,7 @@ inventoryRoutes.post(
       sidecar.popSiteId,
       c.get("userId"),
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result, 201)
@@ -256,7 +258,7 @@ inventoryRoutes.post(
 
 inventoryRoutes.post(
   "/min-stock",
-  requireAnyPermission(ARTICLE_UPDATE),
+  requireMutationPermission(ARTICLE_UPDATE),
   async (c) => {
     const body = applyMinStockBodySchema.safeParse(
       await c.req.json().catch(() => ({})),
@@ -274,6 +276,7 @@ inventoryRoutes.post(
       c.get("supabase"),
       c.get("sidecar").popId,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -282,7 +285,7 @@ inventoryRoutes.post(
 
 inventoryRoutes.post(
   "/transfers",
-  requireAnyPermission(INVENTORY_CREATE),
+  requireMutationPermission(INVENTORY_CREATE),
   async (c) => {
     const body = transferBodySchema.safeParse(
       await c.req.json().catch(() => null),
@@ -301,6 +304,7 @@ inventoryRoutes.post(
       c.get("sidecar").popId,
       c.get("userId"),
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result, 201)
@@ -309,7 +313,7 @@ inventoryRoutes.post(
 
 inventoryRoutes.post(
   "/locations",
-  requireAnyPermission(INVENTORY_CREATE),
+  requireMutationPermission(INVENTORY_CREATE),
   async (c) => {
     const body = createLocationBodySchema.safeParse(
       await c.req.json().catch(() => null),
@@ -327,6 +331,7 @@ inventoryRoutes.post(
       c.get("supabase"),
       c.get("sidecar").popId,
       body.data.name,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result, 201)
@@ -335,7 +340,7 @@ inventoryRoutes.post(
 
 inventoryRoutes.patch(
   "/locations/:locationId",
-  requireAnyPermission(INVENTORY_UPDATE),
+  requireMutationPermission(INVENTORY_UPDATE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("locationId"))
     if (!id.success) {
@@ -358,6 +363,7 @@ inventoryRoutes.patch(
       c.get("sidecar").popId,
       id.data,
       body.data.name,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -366,7 +372,7 @@ inventoryRoutes.patch(
 
 inventoryRoutes.post(
   "/locations/:locationId/archive",
-  requireAnyPermission(INVENTORY_UPDATE),
+  requireMutationPermission(INVENTORY_UPDATE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("locationId"))
     if (!id.success) {
@@ -376,6 +382,7 @@ inventoryRoutes.post(
       c.get("supabase"),
       c.get("sidecar").popId,
       id.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -384,7 +391,7 @@ inventoryRoutes.post(
 
 inventoryRoutes.delete(
   "/movements/:movementId",
-  requireAnyPermission(INVENTORY_DELETE),
+  requireMutationPermission(INVENTORY_DELETE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("movementId"))
     if (!id.success) {
@@ -394,6 +401,7 @@ inventoryRoutes.delete(
       c.get("supabase"),
       c.get("sidecar").popId,
       id.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -402,7 +410,7 @@ inventoryRoutes.delete(
 
 inventoryRoutes.patch(
   "/layers/:layerId/expiry",
-  requireAnyPermission(INVENTORY_WRITE_EXPIRY),
+  requireMutationPermission(INVENTORY_WRITE_EXPIRY),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("layerId"))
     if (!id.success) {
@@ -425,6 +433,7 @@ inventoryRoutes.patch(
       c.get("sidecar").popId,
       id.data,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)

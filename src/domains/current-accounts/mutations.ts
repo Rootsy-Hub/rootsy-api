@@ -1,4 +1,8 @@
+import { randomUUID } from "node:crypto"
 import type { SupabaseClient } from "@supabase/supabase-js"
+import { applyWithAudit } from "../../audit/apply.js"
+import { auditedUpdate } from "../../audit/simpleWrite.js"
+import type { AuditOp, MutationAuditCtx } from "../../audit/types.js"
 import {
   currentAccountDocumentKindForDirection,
   currentAccountOpenAmount,
@@ -18,6 +22,7 @@ export async function setCurrentAccountEnrollment(
   supabase: SupabaseClient,
   popId: string,
   input: EnrollmentBody,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const table = input.direction === "receivable" ? "clients" : "suppliers"
   const patch: Record<string, unknown> = {
@@ -38,10 +43,9 @@ export async function setCurrentAccountEnrollment(
 
   const { data, error } = await supabase
     .from(table)
-    .update(patch)
+    .select("id, current_account_enabled, current_account_credit_limit, current_account_term_days")
     .eq("id", input.partyId)
     .eq("pop_id", popId)
-    .select("id")
     .maybeSingle()
   if (error) {
     return {
@@ -60,6 +64,20 @@ export async function setCurrentAccountEnrollment(
       status: 404,
     }
   }
+
+  const applied = await auditedUpdate(supabase, {
+    kind: "current_accounts.enrollment",
+    table,
+    id: input.partyId,
+    row: patch,
+    ctx: audit,
+    popId,
+    previous: data,
+    next: { ...data, ...patch },
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
+  }
   return { success: true }
 }
 
@@ -68,6 +86,7 @@ export async function applyCurrentAccountCredit(
   popId: string,
   siteId: string,
   input: ApplyCreditBody,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const requested = new Map<string, number>()
   for (const row of input.applications) {
@@ -134,21 +153,29 @@ export async function applyCurrentAccountCredit(
     return { success: false, error: "No hay importes para imputar.", status: 400 }
   }
 
-  const { error } = await supabase.from("current_account_applications").insert(
-    planned.map((row) => ({
+  const ops: AuditOp[] = planned.map((row) => ({
+    op: "insert" as const,
+    table: "current_account_applications",
+    row: {
+      id: randomUUID(),
       pop_id: popId,
       receipt_id: row.receiptId,
       document_kind: kind,
       document_id: row.documentId,
       amount: row.amount,
-    })),
-  )
-  if (error) {
-    return {
-      success: false,
-      error: error.message || "No se pudo imputar el saldo a cuenta.",
-      status: 500,
-    }
+    },
+  }))
+  const applied = await applyWithAudit(supabase, {
+    kind: "current_accounts.apply",
+    ctx: audit,
+    popId,
+    resourceId: input.partyId,
+    previous: null,
+    next: { applications: planned.length },
+    ops,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
   return { success: true }
 }

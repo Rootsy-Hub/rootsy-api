@@ -1,4 +1,7 @@
+import { randomUUID } from "node:crypto"
 import type { SupabaseClient } from "@supabase/supabase-js"
+import { auditedDelete, auditedInsert } from "../../audit/simpleWrite.js"
+import type { MutationAuditCtx } from "../../audit/types.js"
 import { checkoutSnapshotHasItems } from "./parse.js"
 import type { CreatePurchaseOrderBody } from "./schema.js"
 
@@ -27,6 +30,7 @@ export async function createPurchaseOrder(
   popId: string,
   userId: string,
   input: CreatePurchaseOrderBody,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   if (!checkoutSnapshotHasItems(input.checkoutSnapshot)) {
     return {
@@ -38,36 +42,40 @@ export async function createPurchaseOrder(
 
   try {
     const orderNumber = await nextOrderNumber(supabase, popId)
-    const { data, error } = await supabase
-      .from("purchase_orders")
-      .insert({
-        pop_id: popId,
-        order_number: orderNumber,
-        supplier_id: input.supplierId,
-        supplier_name: input.supplierName.trim(),
-        supplier_tax_id: input.supplierTaxId,
-        subtotal: input.subtotal,
-        discount_total: input.discountTotal,
-        total: input.total,
-        checkout_snapshot: input.checkoutSnapshot,
-        metadata: input.metadata ?? {},
-        created_by: userId,
-      })
-      .select("id, order_number")
-      .single()
-
-    if (error || !data) {
+    const id = randomUUID()
+    const row = {
+      id,
+      pop_id: popId,
+      order_number: orderNumber,
+      supplier_id: input.supplierId,
+      supplier_name: input.supplierName.trim(),
+      supplier_tax_id: input.supplierTaxId,
+      subtotal: input.subtotal,
+      discount_total: input.discountTotal,
+      total: input.total,
+      checkout_snapshot: input.checkoutSnapshot,
+      metadata: input.metadata ?? {},
+      created_by: userId,
+    }
+    const applied = await auditedInsert(supabase, {
+      kind: "purchase-orders.create",
+      table: "purchase_orders",
+      row,
+      ctx: audit,
+      popId,
+    })
+    if (!applied.success) {
       return {
         success: false,
-        error: error?.message || "No se pudo guardar la orden de compra.",
-        status: 500,
+        error: applied.error,
+        status: applied.status,
       }
     }
 
     return {
       success: true,
-      orderId: String(data.id),
-      orderNumber: Number(data.order_number) || orderNumber,
+      orderId: id,
+      orderNumber,
     }
   } catch (e: unknown) {
     return {
@@ -85,13 +93,13 @@ export async function deletePurchaseOrder(
   supabase: SupabaseClient,
   popId: string,
   orderId: string,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const { data, error } = await supabase
     .from("purchase_orders")
-    .delete()
+    .select("*")
     .eq("pop_id", popId)
     .eq("id", orderId)
-    .select("id")
     .maybeSingle()
 
   if (error) {
@@ -99,6 +107,17 @@ export async function deletePurchaseOrder(
   }
   if (!data) {
     return { success: false, error: "Orden de compra no encontrada.", status: 404 }
+  }
+  const applied = await auditedDelete(supabase, {
+    kind: "purchase-orders.delete",
+    table: "purchase_orders",
+    id: orderId,
+    ctx: audit,
+    popId,
+    previous: data,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
   return { success: true }
 }

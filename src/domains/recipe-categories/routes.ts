@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import { z } from "zod"
 import type { SidecarEnv } from "../../sidecar/pop.js"
 import { requireAnyPermission } from "../../sidecar/permissions.js"
+import { requireMutationPermission } from "../../sidecar/mutationPermission.js"
 import {
   RECIPE_CATEGORY_CREATE,
   RECIPE_CATEGORY_DELETE,
@@ -51,7 +52,7 @@ recipeCategoryRoutes.get(
 
 recipeCategoryRoutes.patch(
   "/layout",
-  requireAnyPermission(RECIPE_CATEGORY_UPDATE),
+  requireMutationPermission(RECIPE_CATEGORY_UPDATE),
   async (c) => {
     const body = layoutRecipeCategoriesBodySchema.safeParse(
       await c.req.json().catch(() => null),
@@ -69,6 +70,7 @@ recipeCategoryRoutes.patch(
       c.get("supabase"),
       c.get("sidecar").popId,
       body.data.updates,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -77,7 +79,7 @@ recipeCategoryRoutes.patch(
 
 recipeCategoryRoutes.post(
   "/",
-  requireAnyPermission(RECIPE_CATEGORY_CREATE),
+  requireMutationPermission(RECIPE_CATEGORY_CREATE),
   async (c) => {
     const body = createRecipeCategoryBodySchema.safeParse(
       await c.req.json().catch(() => null),
@@ -95,6 +97,7 @@ recipeCategoryRoutes.post(
       c.get("supabase"),
       c.get("sidecar").popId,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status ?? 500)
     return c.json(result, 201)
@@ -121,7 +124,7 @@ recipeCategoryRoutes.get(
 
 recipeCategoryRoutes.patch(
   "/:categoryId",
-  requireAnyPermission(RECIPE_CATEGORY_UPDATE),
+  requireMutationPermission(RECIPE_CATEGORY_UPDATE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("categoryId"))
     if (!id.success) {
@@ -144,6 +147,7 @@ recipeCategoryRoutes.patch(
       c.get("sidecar").popId,
       id.data,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -152,7 +156,7 @@ recipeCategoryRoutes.patch(
 
 recipeCategoryRoutes.delete(
   "/:categoryId",
-  requireAnyPermission(RECIPE_CATEGORY_DELETE),
+  requireMutationPermission(RECIPE_CATEGORY_DELETE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("categoryId"))
     if (!id.success) {
@@ -162,6 +166,7 @@ recipeCategoryRoutes.delete(
       c.get("supabase"),
       c.get("sidecar").popId,
       id.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)

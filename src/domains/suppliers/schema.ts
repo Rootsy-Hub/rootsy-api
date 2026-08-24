@@ -91,6 +91,7 @@ export const deleteSupplierBodySchema = z.object({
 })
 
 export type UpsertSupplierBody = z.infer<typeof upsertSupplierBodySchema>
+export type PatchSupplierBody = Partial<UpsertSupplierBody>
 
 export type SupplierOption = {
   id: string

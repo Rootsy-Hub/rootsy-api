@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import { z } from "zod"
 import type { SidecarEnv } from "../../sidecar/pop.js"
 import { requireAnyPermission } from "../../sidecar/permissions.js"
+import { requireMutationPermission } from "../../sidecar/mutationPermission.js"
 import { ARCA_SALE_POINT_READ, ARCA_SALE_POINT_WRITE } from "./allowlist.js"
 import {
   createArcaSalePoint,
@@ -39,7 +40,7 @@ arcaSalePointRoutes.get("/", requireAnyPermission(ARCA_SALE_POINT_READ), async (
 
 arcaSalePointRoutes.post(
   "/",
-  requireAnyPermission(ARCA_SALE_POINT_WRITE),
+  requireMutationPermission(ARCA_SALE_POINT_WRITE),
   async (c) => {
     const body = createArcaSalePointBodySchema.safeParse(
       await c.req.json().catch(() => null),
@@ -57,6 +58,7 @@ arcaSalePointRoutes.post(
       c.get("supabase"),
       c.get("sidecar").popId,
       body.data.ptoVta,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result, 201)
@@ -83,7 +85,7 @@ arcaSalePointRoutes.get(
 
 arcaSalePointRoutes.post(
   "/:salePointId/csr",
-  requireAnyPermission(ARCA_SALE_POINT_WRITE),
+  requireMutationPermission(ARCA_SALE_POINT_WRITE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("salePointId"))
     if (!id.success) {
@@ -101,7 +103,7 @@ arcaSalePointRoutes.post(
 
 arcaSalePointRoutes.patch(
   "/:salePointId",
-  requireAnyPermission(ARCA_SALE_POINT_WRITE),
+  requireMutationPermission(ARCA_SALE_POINT_WRITE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("salePointId"))
     if (!id.success) {
@@ -124,6 +126,7 @@ arcaSalePointRoutes.patch(
       c.get("sidecar").popId,
       id.data,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)

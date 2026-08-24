@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import { z } from "zod"
 import type { SidecarEnv } from "../../sidecar/pop.js"
 import { requireAnyPermission } from "../../sidecar/permissions.js"
+import { requireMutationPermission } from "../../sidecar/mutationPermission.js"
 import { CURRENT_ACCOUNT_CREATE, CURRENT_ACCOUNT_READ } from "./allowlist.js"
 import { applyCurrentAccountCredit, setCurrentAccountEnrollment } from "./mutations.js"
 import { loadCurrentAccountPaymentContext } from "./paymentContext.js"
@@ -113,7 +114,7 @@ currentAccountRoutes.get(
 
 currentAccountRoutes.patch(
   "/enrollment",
-  requireAnyPermission(CURRENT_ACCOUNT_CREATE),
+  requireMutationPermission(CURRENT_ACCOUNT_CREATE),
   async (c) => {
     const body = enrollmentBodySchema.safeParse(
       await c.req.json().catch(() => null),
@@ -131,6 +132,7 @@ currentAccountRoutes.patch(
       c.get("supabase"),
       c.get("sidecar").popId,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -139,7 +141,7 @@ currentAccountRoutes.patch(
 
 currentAccountRoutes.post(
   "/settle",
-  requireAnyPermission(CURRENT_ACCOUNT_CREATE),
+  requireMutationPermission(CURRENT_ACCOUNT_CREATE),
   async (c) => {
     const body = settleBodySchema.safeParse(await c.req.json().catch(() => null))
     if (!body.success) {
@@ -158,6 +160,7 @@ currentAccountRoutes.post(
       sidecar.popSiteId,
       c.get("userId"),
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -166,7 +169,7 @@ currentAccountRoutes.post(
 
 currentAccountRoutes.post(
   "/apply",
-  requireAnyPermission(CURRENT_ACCOUNT_CREATE),
+  requireMutationPermission(CURRENT_ACCOUNT_CREATE),
   async (c) => {
     const body = applyCreditBodySchema.safeParse(
       await c.req.json().catch(() => null),
@@ -186,6 +189,7 @@ currentAccountRoutes.post(
       sidecar.popId,
       sidecar.popSiteId,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)

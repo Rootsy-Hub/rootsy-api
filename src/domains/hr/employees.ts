@@ -1,4 +1,12 @@
+import { randomUUID } from "node:crypto"
 import type { SupabaseClient } from "@supabase/supabase-js"
+import { applyWithAudit } from "../../audit/apply.js"
+import {
+  auditedDelete,
+  auditedInsert,
+  auditedUpdate,
+} from "../../audit/simpleWrite.js"
+import type { MutationAuditCtx } from "../../audit/types.js"
 import { hasAnyPermission } from "../../sidecar/permissions.js"
 import {
   entryDateIsoInTimezone,
@@ -6,6 +14,7 @@ import {
   timezoneForPopLedger,
 } from "../operations/timezone.js"
 import { asCalendarDay } from "./ids.js"
+import { mergePatch } from "../../lib/patchBody.js"
 import {
   CALENDAR_DAY_RE,
   CLOCK_PIN_RE,
@@ -17,6 +26,7 @@ import {
   type EmployeeRow,
   type FrancoRow,
   type MemberRow,
+  type PatchEmployeeBody,
   type UpsertEmployeeBody,
 } from "./schema.js"
 
@@ -343,13 +353,68 @@ export async function ensureEmployeesFromMembers(
   await supabase.from("pop_employees").insert(ownerRows)
 }
 
+function employeeToUpsertBody(row: EmployeeDbRow): UpsertEmployeeBody {
+  return {
+    firstName: String(row.first_name ?? ""),
+    lastName: String(row.last_name ?? ""),
+    jobTitle: String(row.job_title ?? ""),
+    documentNumber: String(row.document_number ?? ""),
+    email: String(row.email ?? ""),
+    phone: String(row.phone ?? ""),
+    monthlySalary:
+      row.monthly_salary == null || row.monthly_salary === ""
+        ? ""
+        : String(row.monthly_salary),
+    hiredAt: String(row.hired_at ?? ""),
+    notes: String(row.notes ?? ""),
+  }
+}
+
+export async function updateEmployee(
+  supabase: SupabaseClient,
+  popId: string,
+  employeeId: string,
+  patch: PatchEmployeeBody,
+  audit: MutationAuditCtx,
+): Promise<
+  | { success: true; id: string }
+  | { success: false; error: string; status: 400 | 404 | 409 | 500 }
+> {
+  const { data: current, error } = await supabase
+    .from("pop_employees")
+    .select(EMPLOYEE_SELECT)
+    .eq("pop_id", popId)
+    .eq("id", employeeId)
+    .maybeSingle()
+  if (error) {
+    return { success: false, error: error.message, status: 500 }
+  }
+  if (!current) {
+    return {
+      success: false,
+      error: "No encontramos a esa persona.",
+      status: 404,
+    }
+  }
+  return upsertEmployee(
+    supabase,
+    popId,
+    mergePatch(employeeToUpsertBody(current as EmployeeDbRow), {
+      ...patch,
+      id: employeeId,
+    }),
+    audit,
+  )
+}
+
 export async function upsertEmployee(
   supabase: SupabaseClient,
   popId: string,
   input: UpsertEmployeeBody,
+  audit: MutationAuditCtx,
 ): Promise<
   | { success: true; id: string }
-  | { success: false; error: string; status: 400 | 409 | 500 }
+  | { success: false; error: string; status: 400 | 404 | 409 | 500 }
 > {
   const firstName = input.firstName.trim()
   if (!firstName) {
@@ -375,20 +440,26 @@ export async function upsertEmployee(
   }
 
   if (input.id) {
-    const { error } = await supabase
-      .from("pop_employees")
-      .update(payload)
-      .eq("pop_id", popId)
-      .eq("id", input.id)
-    if (error) {
-      if (error.code === "23505") {
+    const applied = await auditedUpdate(supabase, {
+      kind: "hr.employee.patch",
+      table: "pop_employees",
+      id: input.id,
+      row: payload,
+      ctx: audit,
+      popId,
+      previous: { id: input.id },
+      next: payload,
+    })
+    if (!applied.success) {
+      const msg = applied.error || "No se pudo guardar."
+      if (msg.includes("23505") || msg.toLowerCase().includes("duplicate")) {
         return {
           success: false,
           error: "Ya hay alguien activo con ese correo.",
           status: 409,
         }
       }
-      return { success: false, error: error.message, status: 500 }
+      return { success: false, error: msg, status: applied.status }
     }
     return { success: true, id: input.id }
   }
@@ -402,47 +473,69 @@ export async function upsertEmployee(
     }
   }
 
-  const { data, error } = await supabase
-    .from("pop_employees")
-    .insert({ ...payload, clock_pin: clockPin })
-    .select("id")
-    .single()
-  if (error || !data) {
-    if (error?.code === "23505") {
+  const id = randomUUID()
+  const applied = await auditedInsert(supabase, {
+    kind: "hr.employee.create",
+    table: "pop_employees",
+    row: { id, ...payload, clock_pin: clockPin },
+    ctx: audit,
+    popId,
+  })
+  if (!applied.success) {
+    const msg = applied.error || "No se pudo guardar."
+    if (msg.includes("23505") || msg.toLowerCase().includes("duplicate")) {
       return {
         success: false,
         error: "Ya hay alguien activo con ese correo.",
         status: 409,
       }
     }
-    return {
-      success: false,
-      error: error?.message || "No se pudo guardar.",
-      status: 500,
-    }
+    return { success: false, error: msg, status: applied.status }
   }
-  return { success: true, id: String(data.id) }
+  return { success: true, id }
 }
 
 export async function markEmployeeLeft(
   supabase: SupabaseClient,
   popId: string,
   employeeId: string,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const today = new Date().toISOString().slice(0, 10)
-  await supabase
+  const clockedOutAt = new Date().toISOString()
+  const { data: openPunches, error: punchErr } = await supabase
     .from("pop_employee_attendance")
-    .update({ clocked_out_at: new Date().toISOString() })
+    .select("id")
     .eq("pop_id", popId)
     .eq("employee_id", employeeId)
     .is("clocked_out_at", null)
+  if (punchErr) return { success: false, error: punchErr.message, status: 500 }
 
-  const { error } = await supabase
-    .from("pop_employees")
-    .update({ left_at: today })
-    .eq("pop_id", popId)
-    .eq("id", employeeId)
-  if (error) return { success: false, error: error.message, status: 500 }
+  const applied = await applyWithAudit(supabase, {
+    kind: "hr.employee.left",
+    ctx: audit,
+    popId,
+    resourceId: employeeId,
+    previous: null,
+    next: { left_at: today },
+    ops: [
+      ...(openPunches ?? []).map((row) => ({
+        op: "update" as const,
+        table: "pop_employee_attendance",
+        id: String(row.id),
+        row: { clocked_out_at: clockedOutAt },
+      })),
+      {
+        op: "update" as const,
+        table: "pop_employees",
+        id: employeeId,
+        row: { left_at: today },
+      },
+    ],
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
+  }
   return { success: true }
 }
 
@@ -450,6 +543,7 @@ export async function markEmployeeReturned(
   supabase: SupabaseClient,
   popId: string,
   employeeId: string,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const { data: employee, error: lookErr } = await supabase
     .from("pop_employees")
@@ -492,12 +586,19 @@ export async function markEmployeeReturned(
     }
   }
 
-  const { error } = await supabase
-    .from("pop_employees")
-    .update({ left_at: null, clock_pin: nextPin })
-    .eq("pop_id", popId)
-    .eq("id", employeeId)
-  if (error) return { success: false, error: error.message, status: 500 }
+  const applied = await auditedUpdate(supabase, {
+    kind: "hr.employee.returned",
+    table: "pop_employees",
+    id: employeeId,
+    row: { left_at: null, clock_pin: nextPin },
+    ctx: audit,
+    popId,
+    previous: employee,
+    next: { ...employee, left_at: null },
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
+  }
   return { success: true }
 }
 
@@ -506,6 +607,7 @@ export async function clockEmployeeIn(
   popId: string,
   popSiteId: string,
   employeeId: string,
+  audit?: MutationAuditCtx,
 ): Promise<MutateResult> {
   const { data: employee } = await supabase
     .from("pop_employees")
@@ -544,15 +646,38 @@ export async function clockEmployeeIn(
     }
   }
 
-  const { error } = await supabase.from("pop_employee_attendance").insert({
+  const attendanceRow = {
+    id: randomUUID(),
     pop_id: popId,
     employee_id: employeeId,
+  }
+  if (!audit) {
+    const { error } = await supabase.from("pop_employee_attendance").insert({
+      pop_id: popId,
+      employee_id: employeeId,
+    })
+    if (error) {
+      if (error.code === "23505") {
+        return { success: false, error: "Ya está en el local.", status: 409 }
+      }
+      return { success: false, error: error.message, status: 500 }
+    }
+    return { success: true }
+  }
+
+  const applied = await auditedInsert(supabase, {
+    kind: "hr.employee.clock_in",
+    table: "pop_employee_attendance",
+    row: attendanceRow,
+    ctx: audit,
+    popId,
   })
-  if (error) {
-    if (error.code === "23505") {
+  if (!applied.success) {
+    const msg = applied.error || "No se pudo fichar la entrada."
+    if (msg.includes("23505") || msg.toLowerCase().includes("duplicate")) {
       return { success: false, error: "Ya está en el local.", status: 409 }
     }
-    return { success: false, error: error.message, status: 500 }
+    return { success: false, error: msg, status: applied.status }
   }
   return { success: true }
 }
@@ -561,17 +686,51 @@ export async function clockEmployeeOut(
   supabase: SupabaseClient,
   popId: string,
   employeeId: string,
+  audit?: MutationAuditCtx,
 ): Promise<MutateResult> {
+  const clockedOutAt = new Date().toISOString()
+  if (!audit) {
+    const { data, error } = await supabase
+      .from("pop_employee_attendance")
+      .update({ clocked_out_at: clockedOutAt })
+      .eq("pop_id", popId)
+      .eq("employee_id", employeeId)
+      .is("clocked_out_at", null)
+      .select("id")
+    if (error) return { success: false, error: error.message, status: 500 }
+    if (!data?.length) {
+      return { success: false, error: "No está marcada la entrada.", status: 400 }
+    }
+    return { success: true }
+  }
+
   const { data, error } = await supabase
     .from("pop_employee_attendance")
-    .update({ clocked_out_at: new Date().toISOString() })
+    .select("id")
     .eq("pop_id", popId)
     .eq("employee_id", employeeId)
     .is("clocked_out_at", null)
-    .select("id")
   if (error) return { success: false, error: error.message, status: 500 }
   if (!data?.length) {
     return { success: false, error: "No está marcada la entrada.", status: 400 }
+  }
+
+  const applied = await applyWithAudit(supabase, {
+    kind: "hr.employee.clock_out",
+    ctx: audit,
+    popId,
+    resourceId: employeeId,
+    previous: data,
+    next: { clocked_out_at: clockedOutAt },
+    ops: data.map((row) => ({
+      op: "update" as const,
+      table: "pop_employee_attendance",
+      id: String(row.id),
+      row: { clocked_out_at: clockedOutAt },
+    })),
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
   return { success: true }
 }
@@ -675,6 +834,7 @@ export async function markEmployeeFranco(
   employeeId: string,
   day: string,
   kind: "franco" | "falta" = "franco",
+  audit?: MutationAuditCtx,
 ): Promise<MutateResult> {
   const francoDay = asCalendarDay(day)
   if (!CALENDAR_DAY_RE.test(francoDay)) {
@@ -718,21 +878,46 @@ export async function markEmployeeFranco(
     }
   }
 
-  const { error } = await supabase.from("pop_employee_francos").insert({
+  const francoRow = {
+    id: randomUUID(),
     pop_id: popId,
     employee_id: employeeId,
     day: francoDay,
     kind,
-  })
-  if (error) {
-    if (error.code === "23505") {
-      return {
-        success: false,
-        error: "Ese día ya está marcado.",
-        status: 409,
+  }
+  if (!audit) {
+    const { error } = await supabase.from("pop_employee_francos").insert({
+      pop_id: popId,
+      employee_id: employeeId,
+      day: francoDay,
+      kind,
+    })
+    if (error) {
+      if (error.code === "23505") {
+        return {
+          success: false,
+          error: "Ese día ya está marcado.",
+          status: 409,
+        }
       }
+      return { success: false, error: error.message, status: 500 }
     }
-    return { success: false, error: error.message, status: 500 }
+    return { success: true }
+  }
+
+  const applied = await auditedInsert(supabase, {
+    kind: "hr.employee.franco",
+    table: "pop_employee_francos",
+    row: francoRow,
+    ctx: audit,
+    popId,
+  })
+  if (!applied.success) {
+    const msg = applied.error || "No se pudo marcar el día."
+    if (msg.includes("23505") || msg.toLowerCase().includes("duplicate")) {
+      return { success: false, error: "Ese día ya está marcado.", status: 409 }
+    }
+    return { success: false, error: msg, status: applied.status }
   }
   return { success: true }
 }
@@ -742,17 +927,29 @@ export async function removeEmployeeFranco(
   popId: string,
   employeeId: string,
   francoId: string,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const { data, error } = await supabase
     .from("pop_employee_francos")
-    .delete()
+    .select("id")
     .eq("pop_id", popId)
     .eq("employee_id", employeeId)
     .eq("id", francoId)
-    .select("id")
+    .maybeSingle()
   if (error) return { success: false, error: error.message, status: 500 }
-  if (!data?.length) {
+  if (!data?.id) {
     return { success: false, error: "No encontramos ese franco.", status: 404 }
+  }
+  const applied = await auditedDelete(supabase, {
+    kind: "hr.employee.franco.delete",
+    table: "pop_employee_francos",
+    id: francoId,
+    ctx: audit,
+    popId,
+    previous: data,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
   return { success: true }
 }

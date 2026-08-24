@@ -1,6 +1,7 @@
 import type { MiddlewareHandler } from "hono"
 import type { SupabaseClient } from "@supabase/supabase-js"
 import { z } from "zod"
+import type { MutationAuditCtx } from "../audit/types.js"
 import type { PrivateAuthEnv } from "../auth/private.js"
 
 const popIdSchema = z.string().uuid()
@@ -17,6 +18,7 @@ export type PopSidecar = {
 export type SidecarEnv = PrivateAuthEnv & {
   Variables: PrivateAuthEnv["Variables"] & {
     sidecar: PopSidecar
+    mutationAudit: MutationAuditCtx
   }
 }
 

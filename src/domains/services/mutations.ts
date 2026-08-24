@@ -1,13 +1,21 @@
+import { randomUUID } from "node:crypto"
 import type { SupabaseClient } from "@supabase/supabase-js"
+import { applyWithAudit } from "../../audit/apply.js"
+import { auditedUpdate } from "../../audit/simpleWrite.js"
+import type { AuditOp, MutationAuditCtx } from "../../audit/types.js"
 import {
   isServiceBillingPeriod,
   isServicePaymentTiming,
   normalizeServiceDetailsGrid,
   serviceDeleteConfirmPhrase,
 } from "./catalog.js"
+import { mergePatch } from "../../lib/patchBody.js"
+import { getService } from "./queries.js"
 import type {
+  PatchServiceBody,
   ServiceAddonInput,
   ServiceArticleInput,
+  ServiceDetail,
   UpsertServiceBody,
 } from "./schema.js"
 
@@ -122,49 +130,48 @@ async function assertCategoryBelongsToPop(
   return { ok: true }
 }
 
-async function syncServiceTypeArticles(
-  supabase: SupabaseClient,
+function serviceArticleReplaceOps(
   popId: string,
   serviceTypeId: string,
   articles: ServiceArticleInput[],
-): Promise<{ ok: true } | { ok: false; error: string }> {
-  const { error: deleteError } = await supabase
-    .from("service_type_articles")
-    .delete()
-    .eq("service_type_id", serviceTypeId)
-    .eq("pop_id", popId)
-  if (deleteError) return { ok: false, error: deleteError.message }
-
-  const rows = articles
-    .filter((line) => line.articleId.trim() && line.quantity > 0)
-    .map((line, index) => ({
-      pop_id: popId,
-      service_type_id: serviceTypeId,
-      article_id: line.articleId.trim(),
-      quantity: line.quantity,
-      sort_order: index,
-    }))
-  if (rows.length === 0) return { ok: true }
-
-  const { error: insertError } = await supabase
-    .from("service_type_articles")
-    .insert(rows)
-  if (insertError) return { ok: false, error: insertError.message }
-  return { ok: true }
+  existingIds: string[],
+): AuditOp[] {
+  const ops: AuditOp[] = existingIds.map((id) => ({
+    op: "delete",
+    table: "service_type_articles",
+    id,
+  }))
+  const rows = articles.filter((line) => line.articleId.trim() && line.quantity > 0)
+  for (const [index, line] of rows.entries()) {
+    ops.push({
+      op: "insert",
+      table: "service_type_articles",
+      row: {
+        id: randomUUID(),
+        pop_id: popId,
+        service_type_id: serviceTypeId,
+        article_id: line.articleId.trim(),
+        quantity: line.quantity,
+        sort_order: index,
+      },
+    })
+  }
+  return ops
 }
 
-async function syncServiceTypeAddons(
-  supabase: SupabaseClient,
+function serviceAddonReplaceOps(
   popId: string,
   serviceTypeId: string,
   addons: ServiceAddonInput[],
-): Promise<{ ok: true } | { ok: false; error: string }> {
-  const { error: deleteError } = await supabase
-    .from("service_type_addons")
-    .delete()
-    .eq("service_type_id", serviceTypeId)
-    .eq("pop_id", popId)
-  if (deleteError) return { ok: false, error: deleteError.message }
+  existing: { addonId: string; articleIds: string[] }[],
+): AuditOp[] {
+  const ops: AuditOp[] = []
+  for (const addon of existing) {
+    for (const articleId of addon.articleIds) {
+      ops.push({ op: "delete", table: "service_type_addon_articles", id: articleId })
+    }
+    ops.push({ op: "delete", table: "service_type_addons", id: addon.addonId })
+  }
 
   const rows = addons
     .map((addon) => ({
@@ -176,44 +183,36 @@ async function syncServiceTypeAddons(
     }))
     .filter((addon) => addon.name.length > 0)
 
-  for (let index = 0; index < rows.length; index += 1) {
-    const addon = rows[index]
-    const { data, error } = await supabase
-      .from("service_type_addons")
-      .insert({
+  for (const [index, addon] of rows.entries()) {
+    const addonId = randomUUID()
+    ops.push({
+      op: "insert",
+      table: "service_type_addons",
+      row: {
+        id: addonId,
         pop_id: popId,
         service_type_id: serviceTypeId,
         name: addon.name,
         price: addon.price,
         sort_order: index,
+      },
+    })
+    for (const [articleIndex, line] of addon.articles.entries()) {
+      ops.push({
+        op: "insert",
+        table: "service_type_addon_articles",
+        row: {
+          id: randomUUID(),
+          pop_id: popId,
+          addon_id: addonId,
+          article_id: line.articleId.trim(),
+          quantity: line.quantity,
+          sort_order: articleIndex,
+        },
       })
-      .select("id")
-      .single()
-    if (error || !data?.id) {
-      return {
-        ok: false,
-        error: error?.message || "No se pudieron guardar los adicionales.",
-      }
-    }
-
-    const articleRows = addon.articles.map((line, articleIndex) => ({
-      pop_id: popId,
-      addon_id: String(data.id),
-      article_id: line.articleId.trim(),
-      quantity: line.quantity,
-      sort_order: articleIndex,
-    }))
-    if (articleRows.length === 0) continue
-
-    const { error: insertArticlesError } = await supabase
-      .from("service_type_addon_articles")
-      .insert(articleRows)
-    if (insertArticlesError) {
-      return { ok: false, error: insertArticlesError.message }
     }
   }
-
-  return { ok: true }
+  return ops
 }
 
 function serviceWritePayload(input: UpsertServiceBody) {
@@ -246,6 +245,7 @@ export async function createService(
   supabase: SupabaseClient,
   popId: string,
   input: UpsertServiceBody,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const validation = validateServiceInput(input)
   if (!validation.ok) {
@@ -261,51 +261,81 @@ export async function createService(
     return { success: false, error: categoryCheck.error, status: 400 }
   }
 
-  const { data, error } = await supabase
-    .from("service_types")
-    .insert({
-      pop_id: popId,
-      ...serviceWritePayload(input),
-    })
-    .select("id")
-    .single()
-
-  if (error || !data?.id) {
-    return {
-      success: false,
-      error: error?.message || "No se pudo crear el servicio.",
-      status: 500,
-    }
+  const serviceId = randomUUID()
+  const serviceRow = {
+    id: serviceId,
+    pop_id: popId,
+    ...serviceWritePayload(input),
   }
+  const ops: AuditOp[] = [{ op: "insert", table: "service_types", row: serviceRow }]
+  ops.push(...serviceArticleReplaceOps(popId, serviceId, input.articles, []))
+  ops.push(...serviceAddonReplaceOps(popId, serviceId, input.addons, []))
 
-  const serviceId = String(data.id)
-  const articlesSync = await syncServiceTypeArticles(
-    supabase,
+  const applied = await applyWithAudit(supabase, {
+    kind: "services.create",
+    ctx: audit,
     popId,
-    serviceId,
-    input.articles,
-  )
-  if (!articlesSync.ok) {
-    return { success: false, error: articlesSync.error, status: 400 }
-  }
-  const addonsSync = await syncServiceTypeAddons(
-    supabase,
-    popId,
-    serviceId,
-    input.addons,
-  )
-  if (!addonsSync.ok) {
-    return { success: false, error: addonsSync.error, status: 400 }
+    resourceId: serviceId,
+    previous: null,
+    next: serviceRow,
+    ops,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
   return { success: true, id: serviceId }
+}
+
+function serviceToUpsertBody(row: ServiceDetail): UpsertServiceBody {
+  return {
+    name: row.name,
+    description: row.description,
+    categoryId: row.categoryId ?? "",
+    imageUrl: row.imageUrl ?? "",
+    defaultPrice: row.defaultPrice,
+    billingPeriod: row.billingPeriod,
+    billingPeriodLabel: row.billingPeriodLabel ?? "",
+    detailsGrid: row.detailsGrid,
+    contractText: row.contractText,
+    paymentTiming: row.paymentTiming,
+    dueDaysAfter: row.dueDaysAfter,
+    lateInterestType: row.lateInterestType,
+    lateInterestValue: row.lateInterestValue,
+    discountMode: row.discountMode,
+    discountValue: row.discountValue,
+    articles: row.articles.map((line) => ({
+      articleId: line.articleId,
+      quantity: line.quantity,
+    })),
+    addons: row.addons.map((addon) => ({
+      name: addon.name,
+      price: addon.price,
+      articles: addon.articles.map((line) => ({
+        articleId: line.articleId,
+        quantity: line.quantity,
+      })),
+    })),
+    isActive: row.isActive,
+  }
 }
 
 export async function updateService(
   supabase: SupabaseClient,
   popId: string,
   serviceId: string,
-  input: UpsertServiceBody,
+  patch: PatchServiceBody,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
+  const current = await getService(supabase, popId, serviceId)
+  if (!current.success) {
+    return {
+      success: false,
+      error: current.error,
+      status: current.status,
+    }
+  }
+  const input = mergePatch(serviceToUpsertBody(current.data), patch)
+
   const validation = validateServiceInput(input)
   if (!validation.ok) {
     return { success: false, error: validation.error, status: 400 }
@@ -331,32 +361,46 @@ export async function updateService(
     return { success: false, error: categoryCheck.error, status: 400 }
   }
 
-  const { error } = await supabase
-    .from("service_types")
-    .update(serviceWritePayload(input))
-    .eq("id", serviceId)
-    .eq("pop_id", popId)
-    .is("deleted_at", null)
+  const updateRow = serviceWritePayload(input)
+  const ops: AuditOp[] = [
+    { op: "update", table: "service_types", id: serviceId, row: updateRow },
+  ]
 
-  if (error) return { success: false, error: error.message, status: 500 }
-
-  const articlesSync = await syncServiceTypeArticles(
-    supabase,
-    popId,
-    serviceId,
-    input.articles,
-  )
-  if (!articlesSync.ok) {
-    return { success: false, error: articlesSync.error, status: 400 }
+  if (patch.articles !== undefined) {
+    ops.push(
+      ...serviceArticleReplaceOps(
+        popId,
+        serviceId,
+        patch.articles,
+        current.data.articles.map((line) => line.id),
+      ),
+    )
   }
-  const addonsSync = await syncServiceTypeAddons(
-    supabase,
+  if (patch.addons !== undefined) {
+    ops.push(
+      ...serviceAddonReplaceOps(
+        popId,
+        serviceId,
+        patch.addons,
+        current.data.addons.map((addon) => ({
+          addonId: addon.id,
+          articleIds: addon.articles.map((line) => line.id),
+        })),
+      ),
+    )
+  }
+
+  const applied = await applyWithAudit(supabase, {
+    kind: "services.patch",
+    ctx: audit,
     popId,
-    serviceId,
-    input.addons,
-  )
-  if (!addonsSync.ok) {
-    return { success: false, error: addonsSync.error, status: 400 }
+    resourceId: serviceId,
+    previous: current.data,
+    next: { ...current.data, ...input },
+    ops,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
   return { success: true }
 }
@@ -366,6 +410,7 @@ export async function deleteService(
   popId: string,
   serviceId: string,
   confirmationTyped: string,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const { data: service, error: fetchError } = await supabase
     .from("service_types")
@@ -394,11 +439,18 @@ export async function deleteService(
     }
   }
 
-  const { error } = await supabase
-    .from("service_types")
-    .update({ deleted_at: new Date().toISOString(), is_active: false })
-    .eq("id", serviceId)
-    .eq("pop_id", popId)
-  if (error) return { success: false, error: error.message, status: 500 }
+  const applied = await auditedUpdate(supabase, {
+    kind: "services.delete",
+    table: "service_types",
+    id: serviceId,
+    row: { deleted_at: new Date().toISOString(), is_active: false },
+    ctx: audit,
+    popId,
+    previous: service,
+    next: { ...service, deleted_at: true, is_active: false },
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
+  }
   return { success: true }
 }

@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import { z } from "zod"
 import type { SidecarEnv } from "../../sidecar/pop.js"
 import { requireAnyPermission } from "../../sidecar/permissions.js"
+import { requireMutationPermission } from "../../sidecar/mutationPermission.js"
 import {
   PURCHASE_ORDER_CREATE,
   PURCHASE_ORDER_DELETE,
@@ -44,7 +45,7 @@ purchaseOrderRoutes.get("/", requireAnyPermission(PURCHASE_ORDER_READ), async (c
 
 purchaseOrderRoutes.post(
   "/",
-  requireAnyPermission(PURCHASE_ORDER_CREATE),
+  requireMutationPermission(PURCHASE_ORDER_CREATE),
   async (c) => {
     const body = createPurchaseOrderBodySchema.safeParse(
       await c.req.json().catch(() => null),
@@ -63,6 +64,7 @@ purchaseOrderRoutes.post(
       c.get("sidecar").popId,
       c.get("userId"),
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result, 201)
@@ -89,7 +91,7 @@ purchaseOrderRoutes.get(
 
 purchaseOrderRoutes.delete(
   "/:orderId",
-  requireAnyPermission(PURCHASE_ORDER_DELETE),
+  requireMutationPermission(PURCHASE_ORDER_DELETE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("orderId"))
     if (!id.success) {
@@ -99,6 +101,7 @@ purchaseOrderRoutes.delete(
       c.get("supabase"),
       c.get("sidecar").popId,
       id.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)

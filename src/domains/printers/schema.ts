@@ -14,6 +14,7 @@ export const upsertPrinterBodySchema = z.object({
 })
 
 export type UpsertPrinterBody = z.infer<typeof upsertPrinterBodySchema>
+export type PatchPrinterBody = Partial<UpsertPrinterBody>
 
 export type PrinterRow = {
   id: string

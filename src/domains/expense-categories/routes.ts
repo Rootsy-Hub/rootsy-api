@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import { z } from "zod"
 import type { SidecarEnv } from "../../sidecar/pop.js"
 import { requireAnyPermission } from "../../sidecar/permissions.js"
+import { requireMutationPermission } from "../../sidecar/mutationPermission.js"
 import {
   EXPENSE_CATEGORY_CREATE,
   EXPENSE_CATEGORY_DELETE,
@@ -67,7 +68,7 @@ expenseCategoryRoutes.get(
 
 expenseCategoryRoutes.post(
   "/",
-  requireAnyPermission(EXPENSE_CATEGORY_CREATE),
+  requireMutationPermission(EXPENSE_CATEGORY_CREATE),
   async (c) => {
     const body = createExpenseCategoryBodySchema.safeParse(
       await c.req.json().catch(() => null),
@@ -85,6 +86,7 @@ expenseCategoryRoutes.post(
       c.get("supabase"),
       c.get("sidecar").popId,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status ?? 500)
     return c.json(result, 201)
@@ -93,7 +95,7 @@ expenseCategoryRoutes.post(
 
 expenseCategoryRoutes.patch(
   "/:categoryId",
-  requireAnyPermission(EXPENSE_CATEGORY_UPDATE),
+  requireMutationPermission(EXPENSE_CATEGORY_UPDATE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("categoryId"))
     if (!id.success) {
@@ -116,6 +118,7 @@ expenseCategoryRoutes.patch(
       c.get("sidecar").popId,
       id.data,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -124,7 +127,7 @@ expenseCategoryRoutes.patch(
 
 expenseCategoryRoutes.delete(
   "/:categoryId",
-  requireAnyPermission(EXPENSE_CATEGORY_DELETE),
+  requireMutationPermission(EXPENSE_CATEGORY_DELETE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("categoryId"))
     if (!id.success) {
@@ -134,6 +137,7 @@ expenseCategoryRoutes.delete(
       c.get("supabase"),
       c.get("sidecar").popId,
       id.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)

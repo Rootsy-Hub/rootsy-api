@@ -33,6 +33,8 @@ import { hrRoutes } from "./domains/hr/routes.js"
 import { manufacturingRoutes } from "./domains/manufacturing/routes.js"
 import { chatRoutes } from "./domains/chat/routes.js"
 import { saleRoutes } from "./domains/sale/routes.js"
+import { auditRoutes } from "./domains/audit/routes.js"
+import { meApprovalCodeRoutes } from "./domains/me-approval-code/routes.js"
 import { getEnv } from "./env.js"
 import { isTimeoutError } from "./lib/fetchTimeout.js"
 import { requireRequestTimeout } from "./lib/requestTimeout.js"
@@ -68,6 +70,8 @@ export function createApp() {
 
   const pop = new Hono<SidecarEnv>()
   pop.use("*", requirePopSidecar)
+  pop.route("/audit", auditRoutes)
+  pop.route("/me/approval-code", meApprovalCodeRoutes)
   pop.route("/articles", articleRoutes)
   pop.route("/categories", categoryRoutes)
   pop.route("/clients", clientRoutes)

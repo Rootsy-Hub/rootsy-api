@@ -1,10 +1,20 @@
+import { randomUUID } from "node:crypto"
 import type { SupabaseClient } from "@supabase/supabase-js"
+import { mergePatch } from "../../lib/patchBody.js"
 import {
+  auditedDelete,
+  auditedInsert,
+  auditedUpdate,
+} from "../../audit/simpleWrite.js"
+import type { MutationAuditCtx } from "../../audit/types.js"
+import {
+  CLIENT_SELECT,
   normalizeCurrentAccountCreditLimit,
   normalizeCurrentAccountTermDays,
 } from "./queries.js"
 import {
   CLIENT_IVA_CONDITION_VALUES,
+  type PatchClientBody,
   type UpsertClientBody,
 } from "./schema.js"
 
@@ -110,50 +120,100 @@ export async function createClient(
   supabase: SupabaseClient,
   popId: string,
   input: UpsertClientBody,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const name = input.name.trim()
   if (!name) {
     return { success: false, error: "El nombre es obligatorio.", status: 400 }
   }
   const ctx = await loadPopInvoiceContext(supabase, popId)
-  const { error, data } = await supabase
-    .from("clients")
-    .insert(rowFromInput(input, popId, ctx.hasValidFiscalCuit))
-    .select("id")
-    .maybeSingle()
-  if (error) {
-    return {
-      success: false,
-      error: error.message || "No se pudo crear el cliente.",
-      status: 500,
-    }
+  const id = randomUUID()
+  const row = { id, ...rowFromInput(input, popId, ctx.hasValidFiscalCuit) }
+  const applied = await auditedInsert(supabase, {
+    kind: "clients.create",
+    table: "clients",
+    row,
+    ctx: audit,
+    popId,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
-  return { success: true, id: data?.id ? String(data.id) : undefined }
+  return { success: true, id }
+}
+
+function clientRowToUpsert(row: Record<string, unknown>): UpsertClientBody {
+  const limit = normalizeCurrentAccountCreditLimit(
+    row.current_account_credit_limit,
+  )
+  return {
+    name: String(row.name ?? ""),
+    email: String(row.email ?? ""),
+    phone: String(row.phone ?? ""),
+    taxId: String(row.tax_id ?? ""),
+    notes: String(row.notes ?? ""),
+    ivaCondition: String(row.iva_condition ?? ""),
+    addressLine: String(row.address_line ?? ""),
+    defaultInvoiceTypeLabel: String(row.default_invoice_type_label ?? ""),
+    isActive: Boolean(row.is_active ?? true),
+    currentAccountEnabled: row.current_account_enabled === true,
+    currentAccountCreditLimit: limit != null ? String(limit) : "",
+    currentAccountTermDays: String(
+      normalizeCurrentAccountTermDays(row.current_account_term_days),
+    ),
+  }
 }
 
 export async function updateClient(
   supabase: SupabaseClient,
   popId: string,
   clientId: string,
-  input: UpsertClientBody,
+  patch: PatchClientBody,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
+  const { data: current, error: fetchError } = await supabase
+    .from("clients")
+    .select(CLIENT_SELECT)
+    .eq("id", clientId)
+    .eq("pop_id", popId)
+    .maybeSingle()
+  if (fetchError) {
+    return {
+      success: false,
+      error: fetchError.message || "No se encontró el cliente.",
+      status: 500,
+    }
+  }
+  if (!current) {
+    return { success: false, error: "No se encontró el cliente.", status: 404 }
+  }
+  const input = mergePatch(
+    clientRowToUpsert(current as Record<string, unknown>),
+    patch,
+  )
+
   const name = input.name.trim()
   if (!name) {
     return { success: false, error: "El nombre es obligatorio.", status: 400 }
   }
   const ctx = await loadPopInvoiceContext(supabase, popId)
-  const patch = rowFromInput(input, popId, ctx.hasValidFiscalCuit)
-  const { pop_id: _popId, ...updateRow } = patch
-  const { error } = await supabase
-    .from("clients")
-    .update(updateRow)
-    .eq("id", clientId)
-    .eq("pop_id", popId)
-  if (error) {
+  const updatePayload = rowFromInput(input, popId, ctx.hasValidFiscalCuit)
+  const { pop_id: _popId, ...updateRow } = updatePayload
+  const applied = await auditedUpdate(supabase, {
+    kind: "clients.patch",
+    table: "clients",
+    id: clientId,
+    row: updateRow as Record<string, unknown>,
+    ctx: audit,
+    popId,
+    previous: current,
+    next: { ...current, ...updateRow },
+  })
+  if (!applied.success) {
     return {
       success: false,
-      error: error.message || "No se pudo guardar el cliente.",
-      status: 500,
+      error: applied.error,
+      status: applied.status,
     }
   }
   return { success: true }
@@ -164,6 +224,7 @@ export async function deleteClient(
   popId: string,
   clientId: string,
   confirmationTyped: string,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const { data: client, error: fetchError } = await supabase
     .from("clients")
@@ -189,16 +250,19 @@ export async function deleteClient(
       status: 400,
     }
   }
-  const { error } = await supabase
-    .from("clients")
-    .delete()
-    .eq("id", clientId)
-    .eq("pop_id", popId)
-  if (error) {
+  const applied = await auditedDelete(supabase, {
+    kind: "clients.delete",
+    table: "clients",
+    id: clientId,
+    ctx: audit,
+    popId,
+    previous: client,
+  })
+  if (!applied.success) {
     return {
       success: false,
-      error: error.message || "No se pudo eliminar el cliente.",
-      status: 500,
+      error: applied.error,
+      status: applied.status,
     }
   }
   return { success: true }

@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import { z } from "zod"
 import type { SidecarEnv } from "../../sidecar/pop.js"
 import { requireAnyPermission } from "../../sidecar/permissions.js"
+import { requireMutationPermission } from "../../sidecar/mutationPermission.js"
 import {
   SUPPLIER_CREATE,
   SUPPLIER_DELETE,
@@ -15,6 +16,7 @@ import {
   updateSupplier,
 } from "./mutations.js"
 import { listSupplierOptions, listSuppliersTable } from "./queries.js"
+import { parsePatchBody } from "../../lib/patchBody.js"
 import {
   deleteSupplierBodySchema,
   listSuppliersQuerySchema,
@@ -79,7 +81,7 @@ supplierRoutes.get("/table", requireAnyPermission(SUPPLIER_TABLE_READ), async (c
   return c.json(result)
 })
 
-supplierRoutes.post("/", requireAnyPermission(SUPPLIER_CREATE), async (c) => {
+supplierRoutes.post("/", requireMutationPermission(SUPPLIER_CREATE), async (c) => {
   const body = upsertSupplierBodySchema.safeParse(
     await c.req.json().catch(() => null),
   )
@@ -93,6 +95,7 @@ supplierRoutes.post("/", requireAnyPermission(SUPPLIER_CREATE), async (c) => {
     c.get("supabase"),
     c.get("sidecar").popId,
     body.data,
+    c.get("mutationAudit"),
   )
   if (!result.success) return c.json(result, result.status)
   return c.json(result, 201)
@@ -100,29 +103,25 @@ supplierRoutes.post("/", requireAnyPermission(SUPPLIER_CREATE), async (c) => {
 
 supplierRoutes.patch(
   "/:supplierId",
-  requireAnyPermission(SUPPLIER_UPDATE),
+  requireMutationPermission(SUPPLIER_UPDATE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("supplierId"))
     if (!id.success) {
       return c.json({ success: false, error: "supplierId inválido" }, 400)
     }
-    const body = upsertSupplierBodySchema.safeParse(
+    const body = parsePatchBody(
+      upsertSupplierBodySchema,
       await c.req.json().catch(() => null),
     )
     if (!body.success) {
-      return c.json(
-        {
-          success: false,
-          error: body.error.issues[0]?.message ?? "Body inválido",
-        },
-        400,
-      )
+      return c.json({ success: false, error: body.error }, 400)
     }
     const result = await updateSupplier(
       c.get("supabase"),
       c.get("sidecar").popId,
       id.data,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -131,7 +130,7 @@ supplierRoutes.patch(
 
 supplierRoutes.delete(
   "/:supplierId",
-  requireAnyPermission(SUPPLIER_DELETE),
+  requireMutationPermission(SUPPLIER_DELETE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("supplierId"))
     if (!id.success) {
@@ -154,6 +153,7 @@ supplierRoutes.delete(
       c.get("sidecar").popId,
       id.data,
       body.data.confirmationTyped,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)

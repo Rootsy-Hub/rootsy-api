@@ -1,10 +1,20 @@
+import { randomUUID } from "node:crypto"
 import type { SupabaseClient } from "@supabase/supabase-js"
+import { mergePatch } from "../../lib/patchBody.js"
+import {
+  auditedDelete,
+  auditedInsert,
+  auditedUpdate,
+} from "../../audit/simpleWrite.js"
+import type { MutationAuditCtx } from "../../audit/types.js"
 import {
   normalizeCurrentAccountCreditLimit,
   normalizeCurrentAccountTermDays,
+  SUPPLIER_TABLE_SELECT,
 } from "./queries.js"
 import {
   SUPPLIER_IVA_CONDITION_VALUES,
+  type PatchSupplierBody,
   type UpsertSupplierBody,
 } from "./schema.js"
 
@@ -42,7 +52,7 @@ function parseMoneyInput(raw: string, fallback = 0): number {
 }
 
 function rowFromInput(input: UpsertSupplierBody, popId: string) {
-  return {
+  const row: Record<string, unknown> = {
     pop_id: popId,
     name: input.name.trim(),
     email: input.email.trim() || null,
@@ -53,63 +63,113 @@ function rowFromInput(input: UpsertSupplierBody, popId: string) {
     address_line: input.addressLine.trim() || null,
     is_active: input.isActive,
     current_account_enabled: input.currentAccountEnabled,
-    current_account_credit_limit: input.currentAccountEnabled
-      ? normalizeCurrentAccountCreditLimit(
-          parseMoneyInput(input.currentAccountCreditLimit, 0),
-        )
-      : undefined,
-    current_account_term_days: input.currentAccountEnabled
-      ? normalizeCurrentAccountTermDays(input.currentAccountTermDays)
-      : undefined,
   }
+  if (input.currentAccountEnabled) {
+    row.current_account_credit_limit = normalizeCurrentAccountCreditLimit(
+      parseMoneyInput(input.currentAccountCreditLimit, 0),
+    )
+    row.current_account_term_days = normalizeCurrentAccountTermDays(
+      input.currentAccountTermDays,
+    )
+  }
+  return row
 }
 
 export async function createSupplier(
   supabase: SupabaseClient,
   popId: string,
   input: UpsertSupplierBody,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const name = input.name.trim()
   if (!name) {
     return { success: false, error: "El nombre es obligatorio.", status: 400 }
   }
-  const { error, data } = await supabase
-    .from("suppliers")
-    .insert(rowFromInput(input, popId))
-    .select("id")
-    .maybeSingle()
-  if (error) {
-    return {
-      success: false,
-      error: error.message || "No se pudo crear el proveedor.",
-      status: 500,
-    }
+  const id = randomUUID()
+  const row = { id, ...rowFromInput(input, popId) }
+  const applied = await auditedInsert(supabase, {
+    kind: "suppliers.create",
+    table: "suppliers",
+    row,
+    ctx: audit,
+    popId,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
-  return { success: true, id: data?.id ? String(data.id) : undefined }
+  return { success: true, id }
+}
+
+function supplierRowToUpsert(row: Record<string, unknown>): UpsertSupplierBody {
+  const limit = normalizeCurrentAccountCreditLimit(
+    row.current_account_credit_limit,
+  )
+  return {
+    name: String(row.name ?? ""),
+    email: String(row.email ?? ""),
+    phone: String(row.phone ?? ""),
+    taxId: String(row.tax_id ?? ""),
+    notes: String(row.notes ?? ""),
+    ivaCondition: String(row.iva_condition ?? ""),
+    addressLine: String(row.address_line ?? ""),
+    isActive: row.is_active !== false,
+    currentAccountEnabled: row.current_account_enabled === true,
+    currentAccountCreditLimit: limit != null ? String(limit) : "",
+    currentAccountTermDays: String(
+      normalizeCurrentAccountTermDays(row.current_account_term_days),
+    ),
+  }
 }
 
 export async function updateSupplier(
   supabase: SupabaseClient,
   popId: string,
   supplierId: string,
-  input: UpsertSupplierBody,
+  patch: PatchSupplierBody,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
+  const { data: current, error: fetchError } = await supabase
+    .from("suppliers")
+    .select(SUPPLIER_TABLE_SELECT)
+    .eq("id", supplierId)
+    .eq("pop_id", popId)
+    .maybeSingle()
+  if (fetchError) {
+    return {
+      success: false,
+      error: fetchError.message || "No se encontró el proveedor.",
+      status: 500,
+    }
+  }
+  if (!current) {
+    return { success: false, error: "No se encontró el proveedor.", status: 404 }
+  }
+  const input = mergePatch(
+    supplierRowToUpsert(current as Record<string, unknown>),
+    patch,
+  )
+
   const name = input.name.trim()
   if (!name) {
     return { success: false, error: "El nombre es obligatorio.", status: 400 }
   }
-  const patch = rowFromInput(input, popId)
-  const { pop_id: _popId, ...updateRow } = patch
-  const { error } = await supabase
-    .from("suppliers")
-    .update(updateRow)
-    .eq("id", supplierId)
-    .eq("pop_id", popId)
-  if (error) {
+  const updatePayload = rowFromInput(input, popId)
+  const { pop_id: _popId, ...updateRow } = updatePayload
+  const applied = await auditedUpdate(supabase, {
+    kind: "suppliers.patch",
+    table: "suppliers",
+    id: supplierId,
+    row: updateRow,
+    ctx: audit,
+    popId,
+    previous: current,
+    next: { ...current, ...updateRow },
+  })
+  if (!applied.success) {
     return {
       success: false,
-      error: error.message || "No se pudo guardar el proveedor.",
-      status: 500,
+      error: applied.error,
+      status: applied.status,
     }
   }
   return { success: true }
@@ -120,6 +180,7 @@ export async function deleteSupplier(
   popId: string,
   supplierId: string,
   confirmationTyped: string,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const { data: supplier, error: fetchError } = await supabase
     .from("suppliers")
@@ -145,16 +206,19 @@ export async function deleteSupplier(
       status: 400,
     }
   }
-  const { error } = await supabase
-    .from("suppliers")
-    .delete()
-    .eq("id", supplierId)
-    .eq("pop_id", popId)
-  if (error) {
+  const applied = await auditedDelete(supabase, {
+    kind: "suppliers.delete",
+    table: "suppliers",
+    id: supplierId,
+    ctx: audit,
+    popId,
+    previous: supplier,
+  })
+  if (!applied.success) {
     return {
       success: false,
-      error: error.message || "No se pudo eliminar el proveedor.",
-      status: 500,
+      error: applied.error,
+      status: applied.status,
     }
   }
   return { success: true }

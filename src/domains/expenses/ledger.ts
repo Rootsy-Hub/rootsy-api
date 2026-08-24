@@ -1,6 +1,12 @@
 import type { SupabaseClient } from "@supabase/supabase-js"
 import { isValidOperationPaymentKind, roundMoney } from "./accounts.js"
 import type { OperationPaymentKind } from "./schema.js"
+import {
+  nextAccountingEntryNumber,
+  postedAccountingEntryOps,
+  type LedgerLineOp,
+} from "../../audit/ledgerOps.js"
+import type { AuditOp } from "../../audit/types.js"
 
 const PAYMENT_KIND_ACCOUNT_FALLBACK: Record<
   OperationPaymentKind,
@@ -70,53 +76,26 @@ async function nextEntryNumber(
   supabase: SupabaseClient,
   popId: string,
 ): Promise<number> {
-  const { data: maxRow } = await supabase
-    .from("accounting_entries")
-    .select("entry_number")
-    .eq("pop_id", popId)
-    .order("entry_number", { ascending: false })
-    .limit(1)
-    .maybeSingle()
-  return maxRow?.entry_number != null && Number.isFinite(Number(maxRow.entry_number))
-    ? Number(maxRow.entry_number) + 1
-    : 1
+  return nextAccountingEntryNumber(supabase, popId)
 }
 
-async function cancelEntry(
-  supabase: SupabaseClient,
-  entryId: string,
-): Promise<void> {
-  await supabase
-    .from("accounting_entries")
-    .update({ status: "cancelled", updated_at: new Date().toISOString() })
-    .eq("id", entryId)
-}
-
-export async function postExpensePaymentLedger(
+export async function buildExpensePaymentLedgerOps(
   supabase: SupabaseClient,
   args: {
     popId: string
     userId: string
     expensePaymentId: string
+    expenseId: string
+    amount: number
+    paidAt: string
+    paymentKind: string | null
+    treasuryAccountId: string | null
   },
-): Promise<{ success: true } | { success: false; error: string }> {
+): Promise<
+  | { success: true; entryId: string; ops: AuditOp[] }
+  | { success: false; error: string }
+> {
   const { popId, userId, expensePaymentId } = args
-
-  const { data: payRow, error: payErr } = await supabase
-    .from("expense_payments")
-    .select(
-      "id, amount, paid_at, payment_kind, treasury_account_id, accounting_entry_id, expense_id",
-    )
-    .eq("id", expensePaymentId)
-    .eq("pop_id", popId)
-    .maybeSingle()
-
-  if (payErr || !payRow) {
-    return { success: false, error: payErr?.message || "Pago de gasto no encontrado." }
-  }
-  if (payRow.accounting_entry_id) {
-    return { success: true }
-  }
 
   const { data: expRow, error: expErr } = await supabase
     .from("expenses")
@@ -128,7 +107,7 @@ export async function postExpensePaymentLedger(
       expense_categories ( name, kind, accounting_chart_account_id )
     `,
     )
-    .eq("id", String(payRow.expense_id))
+    .eq("id", args.expenseId)
     .eq("pop_id", popId)
     .maybeSingle()
 
@@ -159,24 +138,20 @@ export async function postExpensePaymentLedger(
     }
   }
 
-  const amt = roundMoney(Number(payRow.amount ?? 0))
+  const amt = roundMoney(Number(args.amount ?? 0))
   if (!(amt > 0)) {
     return { success: false, error: "Importe de pago inválido." }
   }
 
   const categoryName = String(cat?.name ?? "")
   const expenseDesc = String(expRow.description ?? "").trim()
-  const paidAt = String(payRow.paid_at ?? "").slice(0, 10)
+  const paidAt = String(args.paidAt ?? "").slice(0, 10)
   const entryDate = /^\d{4}-\d{2}-\d{2}$/.test(paidAt)
     ? paidAt
     : new Date().toISOString().slice(0, 10)
 
-  const paymentKind =
-    payRow.payment_kind != null ? String(payRow.payment_kind) : "other"
-  const treasuryAccountId =
-    payRow.treasury_account_id != null
-      ? String(payRow.treasury_account_id)
-      : null
+  const paymentKind = args.paymentKind != null ? String(args.paymentKind) : "other"
+  const treasuryAccountId = args.treasuryAccountId
   const paymentAccountId = await resolveLedgerAccountForTreasuryPayment(
     supabase,
     popId,
@@ -203,31 +178,9 @@ export async function postExpensePaymentLedger(
   }
 
   const entryDescription = `Gasto — ${categoryName || "Sin categoría"}${expenseDesc ? ` — ${expenseDesc}` : ""}`
-
   const nextNum = await nextEntryNumber(supabase, popId)
-  const { data: entIns, error: entErr } = await supabase
-    .from("accounting_entries")
-    .insert({
-      pop_id: popId,
-      entry_number: nextNum,
-      entry_date: entryDate,
-      source_type: "expense_payment",
-      source_id: expensePaymentId,
-      description: entryDescription,
-      status: "draft",
-      created_by: userId,
-    })
-    .select("id")
-    .single()
-
-  if (entErr || !entIns?.id) {
-    return { success: false, error: entErr?.message || "No se pudo crear el asiento contable." }
-  }
-  const entryId = String(entIns.id)
-
-  const { error: linesErr } = await supabase.from("accounting_entry_lines").insert([
+  const lines: LedgerLineOp[] = [
     {
-      entry_id: entryId,
       account_id: expenseAccountId,
       debit_amount: amt,
       credit_amount: 0,
@@ -235,53 +188,27 @@ export async function postExpensePaymentLedger(
       line_order: 1,
     },
     {
-      entry_id: entryId,
       account_id: paymentAccountId,
       debit_amount: 0,
       credit_amount: amt,
       description: entryDescription,
       line_order: 2,
     },
-  ])
-  if (linesErr) {
-    await cancelEntry(supabase, entryId)
-    return {
-      success: false,
-      error: linesErr.message || "No se pudieron crear las líneas del asiento.",
-    }
-  }
-
-  const { error: postErr } = await supabase
-    .from("accounting_entries")
-    .update({
-      status: "posted",
-      posted_at: new Date().toISOString(),
-      posted_by: userId,
-    })
-    .eq("id", entryId)
-  if (postErr) {
-    await cancelEntry(supabase, entryId)
-    return { success: false, error: postErr.message || "No se pudo registrar el asiento." }
-  }
-
-  const { error: linkErr } = await supabase
-    .from("expense_payments")
-    .update({ accounting_entry_id: entryId })
-    .eq("id", expensePaymentId)
-    .eq("pop_id", popId)
-  if (linkErr) {
-    return {
-      success: false,
-      error:
-        linkErr.message ||
-        "El asiento quedó registrado pero no se pudo vincular al pago. Contactá soporte.",
-    }
-  }
-
-  return { success: true }
+  ]
+  const ledger = postedAccountingEntryOps({
+    popId,
+    userId,
+    entryNumber: nextNum,
+    entryDate,
+    sourceType: "expense_payment",
+    sourceId: expensePaymentId,
+    description: entryDescription,
+    lines,
+  })
+  return { success: true, entryId: ledger.entryId, ops: ledger.ops }
 }
 
-export async function postExpenseVoidReversals(
+export async function buildExpenseVoidReversalOps(
   supabase: SupabaseClient,
   args: {
     popId: string
@@ -289,8 +216,9 @@ export async function postExpenseVoidReversals(
     expenseId: string
     entryDate: string
   },
-): Promise<{ success: true } | { success: false; error: string }> {
+): Promise<{ success: true; ops: AuditOp[] } | { success: false; error: string }> {
   const { popId, userId, expenseId, entryDate } = args
+  const ops: AuditOp[] = []
 
   const { data: payRows, error: payErr } = await supabase
     .from("expense_payments")
@@ -302,6 +230,7 @@ export async function postExpenseVoidReversals(
     return { success: false, error: payErr.message || "No se pudieron leer los pagos del gasto." }
   }
 
+  let nextNum = await nextEntryNumber(supabase, popId)
   for (const p of payRows || []) {
     const pid = String(p.id)
     const origId = p.accounting_entry_id != null ? String(p.accounting_entry_id) : ""
@@ -342,81 +271,35 @@ export async function postExpenseVoidReversals(
 
     const baseDesc = String(origEntry.description ?? "Anulación gasto")
     const revDescription = `Anulación — ${baseDesc}`
-
-    const nextNum = await nextEntryNumber(supabase, popId)
-    const { data: revIns, error: revErr } = await supabase
-      .from("accounting_entries")
-      .insert({
-        pop_id: popId,
-        entry_number: nextNum,
-        entry_date: entryDate,
-        source_type: "expense_void",
-        source_id: pid,
-        description: revDescription,
-        status: "draft",
-        created_by: userId,
-      })
-      .select("id")
-      .single()
-
-    if (revErr || !revIns?.id) {
-      return {
-        success: false,
-        error: revErr?.message || "No se pudo crear el asiento de anulación.",
-      }
-    }
-    const newEntryId = String(revIns.id)
-
-    const payload = lines.map((row, i) => {
-      const d = roundMoney(Number(row.debit_amount ?? 0))
-      const c = roundMoney(Number(row.credit_amount ?? 0))
-      return {
-        entry_id: newEntryId,
-        account_id: String(row.account_id),
-        debit_amount: c,
-        credit_amount: d,
-        description: revDescription,
-        line_order: i + 1,
-      }
+    const ledger = postedAccountingEntryOps({
+      popId,
+      userId,
+      entryNumber: nextNum,
+      entryDate,
+      sourceType: "expense_void",
+      sourceId: pid,
+      description: revDescription,
+      lines: lines.map((row, i) => {
+        const d = roundMoney(Number(row.debit_amount ?? 0))
+        const c = roundMoney(Number(row.credit_amount ?? 0))
+        return {
+          account_id: String(row.account_id),
+          debit_amount: c,
+          credit_amount: d,
+          description: revDescription,
+          line_order: i + 1,
+        }
+      }),
     })
-
-    const { error: insL } = await supabase.from("accounting_entry_lines").insert(payload)
-    if (insL) {
-      await cancelEntry(supabase, newEntryId)
-      return {
-        success: false,
-        error: insL.message || "No se pudieron crear las líneas de anulación.",
-      }
-    }
-
-    const { error: postE } = await supabase
-      .from("accounting_entries")
-      .update({
-        status: "posted",
-        posted_at: new Date().toISOString(),
-        posted_by: userId,
-      })
-      .eq("id", newEntryId)
-    if (postE) {
-      await cancelEntry(supabase, newEntryId)
-      return {
-        success: false,
-        error: postE.message || "No se pudo registrar la anulación contable.",
-      }
-    }
-
-    const { error: upPay } = await supabase
-      .from("expense_payments")
-      .update({ reversal_accounting_entry_id: newEntryId })
-      .eq("id", pid)
-      .eq("pop_id", popId)
-    if (upPay) {
-      return {
-        success: false,
-        error: upPay.message || "No se pudo vincular la anulación al pago.",
-      }
-    }
+    nextNum += 1
+    ops.push(...ledger.ops)
+    ops.push({
+      op: "update",
+      table: "expense_payments",
+      id: pid,
+      row: { reversal_accounting_entry_id: ledger.entryId },
+    })
   }
 
-  return { success: true }
+  return { success: true, ops }
 }

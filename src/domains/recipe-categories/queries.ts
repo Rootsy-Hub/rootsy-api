@@ -1,4 +1,12 @@
+import { randomUUID } from "node:crypto"
 import type { SupabaseClient } from "@supabase/supabase-js"
+import { applyWithAudit } from "../../audit/apply.js"
+import {
+  auditedDelete,
+  auditedInsert,
+  auditedUpdate,
+} from "../../audit/simpleWrite.js"
+import type { AuditOp, MutationAuditCtx } from "../../audit/types.js"
 import type { RecipeCategoryDetail, RecipeCategoryRow } from "./schema.js"
 
 const SELECT =
@@ -67,6 +75,20 @@ async function assertStationInPop(
   if (error) return { ok: false, error: error.message }
   if (!data) return { ok: false, error: "Esa estación no existe." }
   return { ok: true }
+}
+
+async function fetchMappedRow(
+  supabase: SupabaseClient,
+  popId: string,
+  categoryId: string,
+): Promise<RecipeCategoryRow | null> {
+  const { data } = await supabase
+    .from("recipe_categories")
+    .select(SELECT)
+    .eq("pop_id", popId)
+    .eq("id", categoryId)
+    .maybeSingle()
+  return data ? mapRow(data as RecipeCategoryDbRow) : null
 }
 
 export async function listRecipeCategories(
@@ -143,6 +165,7 @@ export async function createRecipeCategory(
     isActive?: boolean
     sortOrder?: number
   },
+  audit: MutationAuditCtx,
 ): Promise<
   | { success: true; data: RecipeCategoryRow }
   | { success: false; error: string; status?: 400 }
@@ -155,24 +178,34 @@ export async function createRecipeCategory(
   }
 
   const sortOrder = input.sortOrder ?? (await nextSortOrder(supabase, popId))
-
-  const { data, error } = await supabase
-    .from("recipe_categories")
-    .insert({
-      pop_id: popId,
-      name: input.name,
-      station_id: input.stationId ?? null,
-      sort_order: sortOrder,
-      show_in_menu: input.showInMenu ?? true,
-      is_active: input.isActive ?? true,
-    })
-    .select(SELECT)
-    .single()
-
-  if (error || !data) {
-    return { success: false, error: error?.message || "No se pudo crear." }
+  const id = randomUUID()
+  const now = new Date().toISOString()
+  const row = {
+    id,
+    pop_id: popId,
+    name: input.name,
+    station_id: input.stationId ?? null,
+    sort_order: sortOrder,
+    show_in_menu: input.showInMenu ?? true,
+    is_active: input.isActive ?? true,
+    created_at: now,
+    updated_at: now,
   }
-  return { success: true, data: mapRow(data as RecipeCategoryDbRow) }
+  const applied = await auditedInsert(supabase, {
+    kind: "recipe-categories.create",
+    table: "recipe_categories",
+    row,
+    ctx: audit,
+    popId,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error || "No se pudo crear." }
+  }
+  const mapped = await fetchMappedRow(supabase, popId, id)
+  return {
+    success: true,
+    data: mapped ?? mapRow({ ...row, comanda_stations: null }),
+  }
 }
 
 export async function updateRecipeCategory(
@@ -186,6 +219,7 @@ export async function updateRecipeCategory(
     isActive?: boolean
     sortOrder?: number
   },
+  audit: MutationAuditCtx,
 ): Promise<
   | { success: true; data: RecipeCategoryRow }
   | { success: false; error: string; status: 404 | 500 }
@@ -197,6 +231,19 @@ export async function updateRecipeCategory(
     }
   }
 
+  const { data: current, error: fetchError } = await supabase
+    .from("recipe_categories")
+    .select(SELECT)
+    .eq("id", categoryId)
+    .eq("pop_id", popId)
+    .maybeSingle()
+  if (fetchError) {
+    return { success: false, error: fetchError.message, status: 500 }
+  }
+  if (!current) {
+    return { success: false, error: "Categoría no encontrada", status: 404 }
+  }
+
   const patch: Record<string, unknown> = {
     updated_at: new Date().toISOString(),
   }
@@ -206,25 +253,35 @@ export async function updateRecipeCategory(
   if (input.isActive != null) patch.is_active = input.isActive
   if (input.sortOrder != null) patch.sort_order = input.sortOrder
 
-  const { data, error } = await supabase
-    .from("recipe_categories")
-    .update(patch)
-    .eq("id", categoryId)
-    .eq("pop_id", popId)
-    .select(SELECT)
-    .maybeSingle()
-
-  if (error) return { success: false, error: error.message, status: 500 }
-  if (!data) {
-    return { success: false, error: "Categoría no encontrada", status: 404 }
+  const applied = await auditedUpdate(supabase, {
+    kind: "recipe-categories.patch",
+    table: "recipe_categories",
+    id: categoryId,
+    row: patch,
+    ctx: audit,
+    popId,
+    previous: current,
+    next: { ...current, ...patch },
+  })
+  if (!applied.success) {
+    return {
+      success: false,
+      error: applied.error,
+      status: applied.status === 404 ? 404 : 500,
+    }
   }
-  return { success: true, data: mapRow(data as RecipeCategoryDbRow) }
+  const mapped = await fetchMappedRow(supabase, popId, categoryId)
+  return {
+    success: true,
+    data: mapped ?? mapRow({ ...(current as RecipeCategoryDbRow), ...patch }),
+  }
 }
 
 export async function deleteRecipeCategory(
   supabase: SupabaseClient,
   popId: string,
   categoryId: string,
+  audit: MutationAuditCtx,
 ): Promise<
   { success: true } | { success: false; error: string; status: 404 | 409 | 500 }
 > {
@@ -248,13 +305,21 @@ export async function deleteRecipeCategory(
     }
   }
 
-  const { error } = await supabase
-    .from("recipe_categories")
-    .delete()
-    .eq("id", categoryId)
-    .eq("pop_id", popId)
-
-  if (error) return { success: false, error: error.message, status: 500 }
+  const applied = await auditedDelete(supabase, {
+    kind: "recipe-categories.delete",
+    table: "recipe_categories",
+    id: categoryId,
+    ctx: audit,
+    popId,
+    previous: existing.data,
+  })
+  if (!applied.success) {
+    return {
+      success: false,
+      error: applied.error,
+      status: applied.status === 404 ? 404 : 500,
+    }
+  }
   return { success: true }
 }
 
@@ -262,11 +327,12 @@ export async function layoutRecipeCategories(
   supabase: SupabaseClient,
   popId: string,
   updates: { id: string; sortOrder: number; showInMenu: boolean }[],
+  audit: MutationAuditCtx,
 ): Promise<{ success: true } | { success: false; error: string; status: 400 | 500 }> {
   const ids = [...new Set(updates.map((u) => u.id))]
   const { data: validRows, error: validErr } = await supabase
     .from("recipe_categories")
-    .select("id")
+    .select("id, sort_order, show_in_menu")
     .eq("pop_id", popId)
     .in("id", ids)
 
@@ -278,18 +344,34 @@ export async function layoutRecipeCategories(
     return { success: false, error: "Ninguna categoría es válida.", status: 400 }
   }
 
-  for (const u of filtered) {
-    const { error } = await supabase
-      .from("recipe_categories")
-      .update({
-        sort_order: u.sortOrder,
-        show_in_menu: u.showInMenu,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", u.id)
-      .eq("pop_id", popId)
-    if (error) return { success: false, error: error.message, status: 500 }
+  const now = new Date().toISOString()
+  const ops: AuditOp[] = filtered.map((u) => ({
+    op: "update" as const,
+    table: "recipe_categories",
+    id: u.id,
+    row: {
+      sort_order: u.sortOrder,
+      show_in_menu: u.showInMenu,
+      updated_at: now,
+    },
+  }))
+  const next = filtered.map((u) => ({
+    id: u.id,
+    sort_order: u.sortOrder,
+    show_in_menu: u.showInMenu,
+    updated_at: now,
+  }))
+  const applied = await applyWithAudit(supabase, {
+    kind: "recipe-categories.patch",
+    ctx: audit,
+    popId,
+    resourceId: filtered[0]?.id ?? null,
+    previous: validRows,
+    next,
+    ops,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: 500 }
   }
-
   return { success: true }
 }

@@ -1,4 +1,7 @@
+import { randomUUID } from "node:crypto"
 import type { SupabaseClient } from "@supabase/supabase-js"
+import { auditedDelete, auditedInsert } from "../../audit/simpleWrite.js"
+import type { MutationAuditCtx } from "../../audit/types.js"
 import { checkoutSnapshotHasItems } from "./parse.js"
 import type { CreateQuoteBody } from "./schema.js"
 
@@ -27,6 +30,7 @@ export async function createQuote(
   popId: string,
   userId: string,
   input: CreateQuoteBody,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   if (!checkoutSnapshotHasItems(input.checkoutSnapshot)) {
     return {
@@ -38,36 +42,40 @@ export async function createQuote(
 
   try {
     const quoteNumber = await nextQuoteNumber(supabase, popId)
-    const { data, error } = await supabase
-      .from("sale_quotes")
-      .insert({
-        pop_id: popId,
-        quote_number: quoteNumber,
-        client_id: input.clientId,
-        customer_name: input.customerName.trim(),
-        customer_tax_id: input.customerTaxId,
-        subtotal: input.subtotal,
-        discount_total: input.discountTotal,
-        total: input.total,
-        checkout_snapshot: input.checkoutSnapshot,
-        metadata: input.metadata ?? {},
-        created_by: userId,
-      })
-      .select("id, quote_number")
-      .single()
-
-    if (error || !data) {
+    const id = randomUUID()
+    const row = {
+      id,
+      pop_id: popId,
+      quote_number: quoteNumber,
+      client_id: input.clientId,
+      customer_name: input.customerName.trim(),
+      customer_tax_id: input.customerTaxId,
+      subtotal: input.subtotal,
+      discount_total: input.discountTotal,
+      total: input.total,
+      checkout_snapshot: input.checkoutSnapshot,
+      metadata: input.metadata ?? {},
+      created_by: userId,
+    }
+    const applied = await auditedInsert(supabase, {
+      kind: "quotes.create",
+      table: "sale_quotes",
+      row,
+      ctx: audit,
+      popId,
+    })
+    if (!applied.success) {
       return {
         success: false,
-        error: error?.message || "No se pudo guardar el presupuesto.",
-        status: 500,
+        error: applied.error,
+        status: applied.status,
       }
     }
 
     return {
       success: true,
-      quoteId: String(data.id),
-      quoteNumber: Number(data.quote_number) || quoteNumber,
+      quoteId: id,
+      quoteNumber,
     }
   } catch (e: unknown) {
     return {
@@ -83,13 +91,13 @@ export async function deleteQuote(
   supabase: SupabaseClient,
   popId: string,
   quoteId: string,
+  audit: MutationAuditCtx,
 ): Promise<MutateResult> {
   const { data, error } = await supabase
     .from("sale_quotes")
-    .delete()
+    .select("*")
     .eq("pop_id", popId)
     .eq("id", quoteId)
-    .select("id")
     .maybeSingle()
 
   if (error) {
@@ -97,6 +105,17 @@ export async function deleteQuote(
   }
   if (!data) {
     return { success: false, error: "Presupuesto no encontrado.", status: 404 }
+  }
+  const applied = await auditedDelete(supabase, {
+    kind: "quotes.delete",
+    table: "sale_quotes",
+    id: quoteId,
+    ctx: audit,
+    popId,
+    previous: data,
+  })
+  if (!applied.success) {
+    return { success: false, error: applied.error, status: applied.status }
   }
   return { success: true }
 }

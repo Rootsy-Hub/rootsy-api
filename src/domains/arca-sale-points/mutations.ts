@@ -1,8 +1,10 @@
+import { randomUUID } from "node:crypto"
 import type { SupabaseClient } from "@supabase/supabase-js"
+import { auditedInsert, auditedUpdate } from "../../audit/simpleWrite.js"
+import type { MutationAuditCtx } from "../../audit/types.js"
 import { generateArcaCsrAndKey } from "./generateCsr.js"
 import {
   ARCA_SALE_POINT_SELECT,
-  isUniquePtoVtaError,
   mapSalePoint,
   type SalePointDbRow,
 } from "./queries.js"
@@ -13,6 +15,10 @@ const DUPLICATE_PTO_VTA = "Ya existe un punto de venta con ese número."
 type GeneratedPair = {
   csrPem: string
   keyPem: string
+}
+
+function isDuplicatePtoVta(message: string): boolean {
+  return /duplicate key|unique|pto_vta/i.test(message)
 }
 
 async function loadPopFiscal(
@@ -51,6 +57,7 @@ export async function createArcaSalePoint(
   supabase: SupabaseClient,
   popId: string,
   ptoVta: number,
+  audit: MutationAuditCtx,
 ): Promise<
   | { success: true; data: ArcaSalePointRow; csrPem: string; keyPem: string }
   | { success: false; error: string; status: 400 | 500 }
@@ -66,25 +73,36 @@ export async function createArcaSalePoint(
     return { success: false, error: generated.error, status: 400 }
   }
 
-  const { data, error } = await supabase
-    .from("arca_sale_points")
-    .insert({ pop_id: popId, pto_vta: ptoVta })
-    .select(ARCA_SALE_POINT_SELECT)
-    .single()
-
-  if (error || !data) {
-    if (isUniquePtoVtaError(error)) {
+  const id = randomUUID()
+  const row: SalePointDbRow = {
+    id,
+    pto_vta: ptoVta,
+    certificate_expires_at: null,
+    certificate_crt_uploaded_at: null,
+    certificate_key_uploaded_at: null,
+    certificate_csr_uploaded_at: null,
+  }
+  const applied = await auditedInsert(supabase, {
+    kind: "arca-sale-points.create",
+    table: "arca_sale_points",
+    row: { id, pop_id: popId, pto_vta: ptoVta },
+    ctx: audit,
+    popId,
+    next: row,
+  })
+  if (!applied.success) {
+    if (isDuplicatePtoVta(applied.error)) {
       return { success: false, error: DUPLICATE_PTO_VTA, status: 400 }
     }
     return {
       success: false,
-      error: error?.message || "No se pudo crear el punto de venta.",
+      error: applied.error || "No se pudo crear el punto de venta.",
       status: 500,
     }
   }
   return {
     success: true,
-    data: mapSalePoint(data as SalePointDbRow),
+    data: mapSalePoint(row),
     csrPem: generated.csrPem,
     keyPem: generated.keyPem,
   }
@@ -147,10 +165,24 @@ export async function updateArcaSalePoint(
     certificateUploaded?: boolean
     keyAndCsrUploaded?: boolean
   },
+  audit: MutationAuditCtx,
 ): Promise<
   | { success: true; data: ArcaSalePointRow }
   | { success: false; error: string; status: 400 | 404 | 500 }
 > {
+  const { data: current, error: fetchError } = await supabase
+    .from("arca_sale_points")
+    .select(ARCA_SALE_POINT_SELECT)
+    .eq("id", salePointId)
+    .eq("pop_id", popId)
+    .maybeSingle()
+  if (fetchError) {
+    return { success: false, error: fetchError.message, status: 500 }
+  }
+  if (!current) {
+    return { success: false, error: "Punto de venta no encontrado", status: 404 }
+  }
+
   const patch: Record<string, unknown> = {}
   if (input.ptoVta != null) patch.pto_vta = input.ptoVta
   if (input.expiresAt !== undefined) {
@@ -170,22 +202,26 @@ export async function updateArcaSalePoint(
     patch.certificate_csr_uploaded_at = now
   }
 
-  const { data, error } = await supabase
-    .from("arca_sale_points")
-    .update(patch)
-    .eq("id", salePointId)
-    .eq("pop_id", popId)
-    .select(ARCA_SALE_POINT_SELECT)
-    .maybeSingle()
-
-  if (error) {
-    if (isUniquePtoVtaError(error)) {
+  const next = { ...current, ...patch }
+  const applied = await auditedUpdate(supabase, {
+    kind: "arca-sale-points.patch",
+    table: "arca_sale_points",
+    id: salePointId,
+    row: patch,
+    ctx: audit,
+    popId,
+    previous: current,
+    next,
+  })
+  if (!applied.success) {
+    if (isDuplicatePtoVta(applied.error)) {
       return { success: false, error: DUPLICATE_PTO_VTA, status: 400 }
     }
-    return { success: false, error: error.message, status: 500 }
+    return {
+      success: false,
+      error: applied.error,
+      status: applied.status === 404 ? 404 : 500,
+    }
   }
-  if (!data) {
-    return { success: false, error: "Punto de venta no encontrado", status: 404 }
-  }
-  return { success: true, data: mapSalePoint(data as SalePointDbRow) }
+  return { success: true, data: mapSalePoint(next as SalePointDbRow) }
 }

@@ -121,6 +121,7 @@ export const deleteServiceBodySchema = z.object({
 export type ServiceArticleInput = z.infer<typeof serviceArticleInputSchema>
 export type ServiceAddonInput = z.infer<typeof serviceAddonInputSchema>
 export type UpsertServiceBody = z.infer<typeof upsertServiceBodySchema>
+export type PatchServiceBody = Partial<UpsertServiceBody>
 
 export type ServiceArticleOption = {
   id: string

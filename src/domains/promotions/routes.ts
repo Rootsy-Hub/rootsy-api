@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import { z } from "zod"
 import type { SidecarEnv } from "../../sidecar/pop.js"
 import { requireAnyPermission } from "../../sidecar/permissions.js"
+import { requireMutationPermission } from "../../sidecar/mutationPermission.js"
 import {
   PROMOTION_CREATE,
   PROMOTION_DELETE,
@@ -10,6 +11,7 @@ import {
 } from "./allowlist.js"
 import { createPromotion, deletePromotion, updatePromotion } from "./mutations.js"
 import { getPromotion, listPromotionCatalog, listPromotions } from "./queries.js"
+import { parsePatchBody } from "../../lib/patchBody.js"
 import {
   deletePromotionBodySchema,
   listPromotionsQuerySchema,
@@ -55,7 +57,7 @@ promotionRoutes.get("/", requireAnyPermission(PROMOTION_READ), async (c) => {
   return c.json(result)
 })
 
-promotionRoutes.post("/", requireAnyPermission(PROMOTION_CREATE), async (c) => {
+promotionRoutes.post("/", requireMutationPermission(PROMOTION_CREATE), async (c) => {
   const body = upsertPromotionBodySchema.safeParse(
     await c.req.json().catch(() => null),
   )
@@ -69,6 +71,7 @@ promotionRoutes.post("/", requireAnyPermission(PROMOTION_CREATE), async (c) => {
     c.get("supabase"),
     c.get("sidecar").popId,
     body.data,
+    c.get("mutationAudit"),
   )
   if (!result.success) return c.json(result, result.status)
   return c.json(result, 201)
@@ -107,26 +110,25 @@ promotionRoutes.get(
 
 promotionRoutes.patch(
   "/:promotionId",
-  requireAnyPermission(PROMOTION_UPDATE),
+  requireMutationPermission(PROMOTION_UPDATE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("promotionId"))
     if (!id.success) {
       return c.json({ success: false, error: "promotionId inválido" }, 400)
     }
-    const body = upsertPromotionBodySchema.safeParse(
+    const body = parsePatchBody(
+      upsertPromotionBodySchema,
       await c.req.json().catch(() => null),
     )
     if (!body.success) {
-      return c.json(
-        { success: false, error: body.error.issues[0]?.message ?? "Body inválido" },
-        400,
-      )
+      return c.json({ success: false, error: body.error }, 400)
     }
     const result = await updatePromotion(
       c.get("supabase"),
       c.get("sidecar").popId,
       id.data,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -135,7 +137,7 @@ promotionRoutes.patch(
 
 promotionRoutes.delete(
   "/:promotionId",
-  requireAnyPermission(PROMOTION_DELETE),
+  requireMutationPermission(PROMOTION_DELETE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("promotionId"))
     if (!id.success) {
@@ -155,6 +157,7 @@ promotionRoutes.delete(
       c.get("sidecar").popId,
       id.data,
       body.data.confirmationTyped,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)

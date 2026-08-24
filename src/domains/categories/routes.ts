@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import { z } from "zod"
 import type { SidecarEnv } from "../../sidecar/pop.js"
 import { requireAnyPermission } from "../../sidecar/permissions.js"
+import { requireMutationPermission } from "../../sidecar/mutationPermission.js"
 import {
   CATEGORY_CREATE,
   CATEGORY_DELETE,
@@ -61,7 +62,7 @@ categoryRoutes.get("/:categoryId", requireAnyPermission(CATEGORY_READ), async (c
   return c.json(result)
 })
 
-categoryRoutes.post("/", requireAnyPermission(CATEGORY_CREATE), async (c) => {
+categoryRoutes.post("/", requireMutationPermission(CATEGORY_CREATE), async (c) => {
   const body = createCategoryBodySchema.safeParse(await c.req.json().catch(() => null))
   if (!body.success) {
     return c.json(
@@ -73,6 +74,7 @@ categoryRoutes.post("/", requireAnyPermission(CATEGORY_CREATE), async (c) => {
     c.get("supabase"),
     c.get("sidecar").popId,
     body.data,
+    c.get("mutationAudit"),
   )
   if (!result.success) return c.json(result, 500)
   return c.json(result, 201)
@@ -80,7 +82,7 @@ categoryRoutes.post("/", requireAnyPermission(CATEGORY_CREATE), async (c) => {
 
 categoryRoutes.patch(
   "/layout",
-  requireAnyPermission(CATEGORY_UPDATE),
+  requireMutationPermission(CATEGORY_UPDATE),
   async (c) => {
     const body = layoutCategoriesBodySchema.safeParse(
       await c.req.json().catch(() => null),
@@ -98,6 +100,7 @@ categoryRoutes.patch(
       c.get("supabase"),
       c.get("sidecar").popId,
       body.data.updates,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -106,7 +109,7 @@ categoryRoutes.patch(
 
 categoryRoutes.patch(
   "/:categoryId",
-  requireAnyPermission(CATEGORY_UPDATE),
+  requireMutationPermission(CATEGORY_UPDATE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("categoryId"))
     if (!id.success) {
@@ -129,6 +132,7 @@ categoryRoutes.patch(
       c.get("sidecar").popId,
       id.data,
       body.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
@@ -137,7 +141,7 @@ categoryRoutes.patch(
 
 categoryRoutes.delete(
   "/:categoryId",
-  requireAnyPermission(CATEGORY_DELETE),
+  requireMutationPermission(CATEGORY_DELETE),
   async (c) => {
     const id = idSchema.safeParse(c.req.param("categoryId"))
     if (!id.success) {
@@ -147,6 +151,7 @@ categoryRoutes.delete(
       c.get("supabase"),
       c.get("sidecar").popId,
       id.data,
+      c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
     return c.json(result)
