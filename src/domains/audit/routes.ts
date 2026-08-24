@@ -63,25 +63,63 @@ function buildAuditSearchOr(raw: string | undefined): string | null {
   ].join(",")
 }
 
-function personName(row: { first_name?: string | null; last_name?: string | null }): string {
+function personName(row: {
+  first_name?: string | null
+  last_name?: string | null
+}): string {
   return `${row.first_name ?? ""} ${row.last_name ?? ""}`.trim()
 }
 
+/** Empleado del POP primero (nombre de RRHH); si no hay ficha, la cuenta. */
 async function namesByUserId(
   supabase: SupabaseClient,
+  popId: string,
   ids: string[],
 ): Promise<Map<string, string>> {
   const unique = [...new Set(ids.filter(Boolean))]
   const map = new Map<string, string>()
   if (unique.length === 0) return map
-  const { data } = await supabase
-    .from("users")
-    .select("id, first_name, last_name")
-    .in("id", unique)
-  for (const row of data ?? []) {
-    const name = personName(row)
-    if (name) map.set(String(row.id), name)
+
+  const [{ data: employees }, { data: profiles }] = await Promise.all([
+    supabase
+      .from("pop_employees")
+      .select("user_id, first_name, last_name, left_at")
+      .eq("pop_id", popId)
+      .in("user_id", unique),
+    supabase.from("users").select("id, first_name, last_name").in("id", unique),
+  ])
+
+  for (const profile of profiles ?? []) {
+    const name = personName(profile)
+    if (name) map.set(String(profile.id), name)
   }
+
+  const employeeRows = new Map<
+    string,
+    { first_name: string; last_name: string; left_at: string | null }[]
+  >()
+  for (const employee of employees ?? []) {
+    if (!employee.user_id) continue
+    const id = String(employee.user_id)
+    const rows = employeeRows.get(id) ?? []
+    rows.push({
+      first_name: employee.first_name ?? "",
+      last_name: employee.last_name ?? "",
+      left_at: employee.left_at ?? null,
+    })
+    employeeRows.set(id, rows)
+  }
+
+  for (const [id, rows] of employeeRows) {
+    const ranked = [...rows].sort((a, b) => Number(Boolean(a.left_at)) - Number(Boolean(b.left_at)))
+    for (const row of ranked) {
+      const name = personName(row)
+      if (!name) continue
+      map.set(id, name)
+      break
+    }
+  }
+
   return map
 }
 
@@ -164,6 +202,7 @@ auditRoutes.get("/", requireAnyPermission(AUDIT_READ), async (c) => {
   const rows = (data ?? []) as AuditEventRow[]
   const names = await namesByUserId(
     supabase,
+    popId,
     rows.flatMap((row) =>
       [row.requester_user_id, row.approver_user_id].filter((id): id is string => Boolean(id)),
     ),
