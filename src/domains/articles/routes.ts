@@ -8,6 +8,10 @@ import { uploadArticleImage } from "./image.js"
 import { createArticle, deleteArticle, updateArticle } from "./mutations.js"
 import { getArticle, listArticles } from "./queries.js"
 import {
+  articleRealtimeSnapshot,
+  publishArticleEvent,
+} from "./realtime.js"
+import {
   createArticleRoute,
   deleteArticleRoute,
   getArticleRoute,
@@ -59,6 +63,16 @@ articleRoutes.openapi(createArticleRoute, async (c) => {
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  if (result.articleId) {
+    const row = await getArticle(c.get("supabase"), sidecar.popId, result.articleId)
+    if (row.success) {
+      void publishArticleEvent(c, {
+        type: "articles.created",
+        articleId: result.articleId,
+        payload: { article: articleRealtimeSnapshot(row.data) },
+      }).catch(() => undefined)
+    }
+  }
   return c.json({ success: true as const }, 201)
 })
 
@@ -94,26 +108,41 @@ articleRoutes.openapi(patchArticleRoute, async (c) => {
   )
   if (!body.success) return apiFail(c, body.error, 400)
   const sidecar = c.get("sidecar")
+  const articleId = routeParam(c, "articleId")
   const result = await updateArticle(
     c.get("supabase"),
     sidecar.popId,
     sidecar.popSiteId,
-    routeParam(c, "articleId"),
+    articleId,
     body.data,
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  const row = await getArticle(c.get("supabase"), sidecar.popId, articleId)
+  if (row.success) {
+    void publishArticleEvent(c, {
+      type: "articles.updated",
+      articleId,
+      payload: { article: articleRealtimeSnapshot(row.data) },
+    }).catch(() => undefined)
+  }
   return c.json({ success: true as const }, 200)
 })
 
 articleRoutes.openapi(deleteArticleRoute, async (c) => {
+  const articleId = routeParam(c, "articleId")
   const result = await deleteArticle(
     c.get("supabase"),
     c.get("sidecar").popId,
-    routeParam(c, "articleId"),
+    articleId,
     routeInput<{ confirmationTyped: string }>(c, "json").confirmationTyped,
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  void publishArticleEvent(c, {
+    type: "articles.deleted",
+    articleId,
+    payload: { articleId },
+  }).catch(() => undefined)
   return c.json({ success: true as const }, 200)
 })

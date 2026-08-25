@@ -12,6 +12,10 @@ import {
   updateCategory,
 } from "./queries.js"
 import {
+  categoryRealtimePayload,
+  publishCategoryEvent,
+} from "./realtime.js"
+import {
   createCategoryRoute,
   deleteCategoryRoute,
   getCategoryRoute,
@@ -49,6 +53,11 @@ categoryRoutes.openapi(createCategoryRoute, async (c) => {
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, 500)
+  void publishCategoryEvent(c, {
+    type: "categories.created",
+    categoryId: result.data.id,
+    payload: categoryRealtimePayload(result.data),
+  }).catch(() => undefined)
   return c.json(result, 201)
 })
 
@@ -61,6 +70,19 @@ categoryRoutes.openapi(layoutCategoriesRoute, async (c) => {
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  for (const update of body.updates) {
+    void publishCategoryEvent(c, {
+      type: "categories.updated",
+      categoryId: update.id,
+      payload: {
+        category: {
+          id: update.id,
+          sortOrder: update.sortOrder,
+          showInSale: update.showInSale,
+        },
+      },
+    }).catch(() => undefined)
+  }
   return c.json({ success: true as const }, 200)
 })
 
@@ -83,16 +105,27 @@ categoryRoutes.openapi(updateCategoryRoute, async (c) => {
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  void publishCategoryEvent(c, {
+    type: "categories.updated",
+    categoryId: result.data.id,
+    payload: categoryRealtimePayload(result.data),
+  }).catch(() => undefined)
   return c.json(result, 200)
 })
 
 categoryRoutes.openapi(deleteCategoryRoute, async (c) => {
+  const categoryId = routeParam(c, "categoryId")
   const result = await deleteCategory(
     c.get("supabase"),
     c.get("sidecar").popId,
-    routeParam(c, "categoryId"),
+    categoryId,
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  void publishCategoryEvent(c, {
+    type: "categories.deleted",
+    categoryId,
+    payload: { categoryId },
+  }).catch(() => undefined)
   return c.json({ success: true as const }, 200)
 })

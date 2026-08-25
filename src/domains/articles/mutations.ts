@@ -24,7 +24,7 @@ import type {
 } from "./schema.js"
 
 type MutateResult =
-  | { success: true }
+  | { success: true; articleId?: string }
   | { success: false; error: string; status: 400 | 403 | 404 | 409 | 500 }
 
 async function validateCategory(
@@ -415,7 +415,7 @@ export async function createArticle(
     return { success: false, error: applied.error, status: applied.status }
   }
 
-  return { success: true }
+  return { success: true, articleId }
 }
 
 function articleToUpsertBody(row: ArticleRow): UpsertArticleBody {

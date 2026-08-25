@@ -1,4 +1,7 @@
+import { CATALOG_REALTIME_READ } from "./catalogAcl.js"
 import type { ConnectionAttachment, DomainEvent } from "./protocol.js"
+
+const CATALOG_SUBSCRIBE_KEYS = new Set<string>(CATALOG_REALTIME_READ)
 
 const DOMAIN_RE = /^[a-z][a-z0-9-]{0,62}$/
 const RESOURCE_TYPE_RE = /^[a-z][a-z0-9-]{0,62}$/
@@ -73,6 +76,9 @@ export function canSubscribeToChannel(
   if (channel.startsWith("domain:")) {
     if (session.isOwner) return true
     const domain = channel.slice("domain:".length)
+    if (domain === "articles" || domain === "categories") {
+      return session.keys.some((key) => CATALOG_SUBSCRIBE_KEYS.has(key))
+    }
     return session.keys.some((key) => key === `${domain}:read` || key.startsWith(`${domain}:`))
   }
 
