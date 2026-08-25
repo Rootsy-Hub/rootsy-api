@@ -1,6 +1,7 @@
-import { Hono } from "hono"
 import { z } from "zod"
 import type { SidecarEnv } from "../../sidecar/pop.js"
+import { createOpenApiApp } from "../../openapi/app.js"
+import { apiFail } from "../../openapi/respond.js"
 import { requireAnyPermission } from "../../sidecar/permissions.js"
 import { requireMutationPermission } from "../../sidecar/mutationPermission.js"
 import {
@@ -17,6 +18,8 @@ import {
   openCashSession,
   updateCashRegister,
 } from "./mutations.js"
+import { operateOpenSessionRoute } from "./openapi.js"
+import { getOperateOpenCashSession } from "./openSession.js"
 import { getCashRegistersOpenTotals } from "./openTotals.js"
 import { getCashRegistersPeriodReport, getCashRegistersPeriodTotals } from "./period.js"
 import { getCashRegistersFormContext, listCashRegisters } from "./queries.js"
@@ -32,7 +35,7 @@ import {
 import { getCashRegisterSessionArqueo } from "./arqueo.js"
 import { getCashRegisterPage, getCashRegisterTotals } from "./summary.js"
 
-export const cashRegisterRoutes = new Hono<SidecarEnv>()
+export const cashRegisterRoutes = createOpenApiApp<SidecarEnv>()
 
 const idSchema = z.string().uuid()
 
@@ -49,6 +52,16 @@ function bodyError(issues: { message: string }[]) {
     error: issues[0]?.message ?? "Body inválido",
   }
 }
+
+cashRegisterRoutes.openapi(operateOpenSessionRoute, async (c) => {
+  const result = await getOperateOpenCashSession(
+    c.get("supabase"),
+    c.get("sidecar").popId,
+    c.get("userId"),
+  )
+  if (!result.success) return apiFail(c, result.error, 500)
+  return c.json(result, 200)
+})
 
 cashRegisterRoutes.get(
   "/period/totals",

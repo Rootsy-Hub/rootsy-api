@@ -1,14 +1,8 @@
-import { Hono } from "hono"
-import { z } from "zod"
+import type { z } from "zod"
 import type { SidecarEnv } from "../../sidecar/pop.js"
-import { requireAnyPermission } from "../../sidecar/permissions.js"
-import { requireMutationPermission } from "../../sidecar/mutationPermission.js"
-import {
-  CATEGORY_CREATE,
-  CATEGORY_DELETE,
-  CATEGORY_READ,
-  CATEGORY_UPDATE,
-} from "./allowlist.js"
+import { createOpenApiApp } from "../../openapi/app.js"
+import { apiFail } from "../../openapi/respond.js"
+import { routeInput, routeParam } from "../../openapi/valid.js"
 import {
   createCategory,
   deleteCategory,
@@ -18,142 +12,87 @@ import {
   updateCategory,
 } from "./queries.js"
 import {
+  createCategoryRoute,
+  deleteCategoryRoute,
+  getCategoryRoute,
+  layoutCategoriesRoute,
+  listCategoriesRoute,
+  updateCategoryRoute,
+} from "./openapi.js"
+import {
   createCategoryBodySchema,
   layoutCategoriesBodySchema,
   listCategoriesQuerySchema,
+  toListCategoriesQuery,
   updateCategoryBodySchema,
 } from "./schema.js"
 
-const idSchema = z.string().uuid()
+export const categoryRoutes = createOpenApiApp<SidecarEnv>()
 
-export const categoryRoutes = new Hono<SidecarEnv>()
-
-categoryRoutes.get("/", requireAnyPermission(CATEGORY_READ), async (c) => {
-  const parsed = listCategoriesQuerySchema.safeParse({
-    itemKind: c.req.query("itemKind") || undefined,
-    showInSale: c.req.query("showInSale") || undefined,
-    showInMenu: c.req.query("showInMenu") || undefined,
-    visible: c.req.query("visible") || undefined,
-  })
-  if (!parsed.success) {
-    return c.json({ success: false, error: "Parámetros inválidos" }, 400)
-  }
-
+categoryRoutes.openapi(listCategoriesRoute, async (c) => {
   const result = await listCategories(
     c.get("supabase"),
     c.get("sidecar").popId,
-    parsed.data,
+    toListCategoriesQuery(
+      routeInput<z.infer<typeof listCategoriesQuerySchema>>(c, "query"),
+    ),
   )
-  if (!result.success) return c.json(result, 500)
-  return c.json(result)
+  if (!result.success) return apiFail(c, result.error, 500)
+  return c.json(result, 200)
 })
 
-categoryRoutes.get("/:categoryId", requireAnyPermission(CATEGORY_READ), async (c) => {
-  const id = idSchema.safeParse(c.req.param("categoryId"))
-  if (!id.success) {
-    return c.json({ success: false, error: "categoryId inválido" }, 400)
-  }
-  const result = await getCategory(
-    c.get("supabase"),
-    c.get("sidecar").popId,
-    id.data,
-  )
-  if (!result.success) return c.json(result, result.status)
-  return c.json(result)
-})
-
-categoryRoutes.post("/", requireMutationPermission(CATEGORY_CREATE), async (c) => {
-  const body = createCategoryBodySchema.safeParse(await c.req.json().catch(() => null))
-  if (!body.success) {
-    return c.json(
-      { success: false, error: body.error.issues[0]?.message ?? "Body inválido" },
-      400,
-    )
-  }
+categoryRoutes.openapi(createCategoryRoute, async (c) => {
   const result = await createCategory(
     c.get("supabase"),
     c.get("sidecar").popId,
-    body.data,
+    routeInput<z.infer<typeof createCategoryBodySchema>>(c, "json"),
     c.get("mutationAudit"),
   )
-  if (!result.success) return c.json(result, 500)
+  if (!result.success) return apiFail(c, result.error, 500)
   return c.json(result, 201)
 })
 
-categoryRoutes.patch(
-  "/layout",
-  requireMutationPermission(CATEGORY_UPDATE),
-  async (c) => {
-    const body = layoutCategoriesBodySchema.safeParse(
-      await c.req.json().catch(() => null),
-    )
-    if (!body.success) {
-      return c.json(
-        {
-          success: false,
-          error: body.error.issues[0]?.message ?? "Body inválido",
-        },
-        400,
-      )
-    }
-    const result = await layoutCategories(
-      c.get("supabase"),
-      c.get("sidecar").popId,
-      body.data.updates,
-      c.get("mutationAudit"),
-    )
-    if (!result.success) return c.json(result, result.status)
-    return c.json(result)
-  },
-)
+categoryRoutes.openapi(layoutCategoriesRoute, async (c) => {
+  const body = routeInput<z.infer<typeof layoutCategoriesBodySchema>>(c, "json")
+  const result = await layoutCategories(
+    c.get("supabase"),
+    c.get("sidecar").popId,
+    body.updates,
+    c.get("mutationAudit"),
+  )
+  if (!result.success) return apiFail(c, result.error, result.status)
+  return c.json({ success: true as const }, 200)
+})
 
-categoryRoutes.patch(
-  "/:categoryId",
-  requireMutationPermission(CATEGORY_UPDATE),
-  async (c) => {
-    const id = idSchema.safeParse(c.req.param("categoryId"))
-    if (!id.success) {
-      return c.json({ success: false, error: "categoryId inválido" }, 400)
-    }
-    const body = updateCategoryBodySchema.safeParse(
-      await c.req.json().catch(() => null),
-    )
-    if (!body.success) {
-      return c.json(
-        {
-          success: false,
-          error: body.error.issues[0]?.message ?? "Body inválido",
-        },
-        400,
-      )
-    }
-    const result = await updateCategory(
-      c.get("supabase"),
-      c.get("sidecar").popId,
-      id.data,
-      body.data,
-      c.get("mutationAudit"),
-    )
-    if (!result.success) return c.json(result, result.status)
-    return c.json(result)
-  },
-)
+categoryRoutes.openapi(getCategoryRoute, async (c) => {
+  const result = await getCategory(
+    c.get("supabase"),
+    c.get("sidecar").popId,
+    routeParam(c, "categoryId"),
+  )
+  if (!result.success) return apiFail(c, result.error, result.status)
+  return c.json(result, 200)
+})
 
-categoryRoutes.delete(
-  "/:categoryId",
-  requireMutationPermission(CATEGORY_DELETE),
-  async (c) => {
-    const id = idSchema.safeParse(c.req.param("categoryId"))
-    if (!id.success) {
-      return c.json({ success: false, error: "categoryId inválido" }, 400)
-    }
-    const result = await deleteCategory(
-      c.get("supabase"),
-      c.get("sidecar").popId,
-      id.data,
-      c.get("mutationAudit"),
-    )
-    if (!result.success) return c.json(result, result.status)
-    return c.json(result)
-  },
-)
+categoryRoutes.openapi(updateCategoryRoute, async (c) => {
+  const result = await updateCategory(
+    c.get("supabase"),
+    c.get("sidecar").popId,
+    routeParam(c, "categoryId"),
+    routeInput<z.infer<typeof updateCategoryBodySchema>>(c, "json"),
+    c.get("mutationAudit"),
+  )
+  if (!result.success) return apiFail(c, result.error, result.status)
+  return c.json(result, 200)
+})
+
+categoryRoutes.openapi(deleteCategoryRoute, async (c) => {
+  const result = await deleteCategory(
+    c.get("supabase"),
+    c.get("sidecar").popId,
+    routeParam(c, "categoryId"),
+    c.get("mutationAudit"),
+  )
+  if (!result.success) return apiFail(c, result.error, result.status)
+  return c.json({ success: true as const }, 200)
+})

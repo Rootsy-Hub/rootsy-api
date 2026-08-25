@@ -8,4 +8,5 @@ const env = getEnv()
 
 serve({ fetch: app.fetch, port: env.PORT }, (info) => {
   console.log(`rootsy-api escuchando en http://localhost:${info.port}`)
+  console.log(`docs: http://localhost:${info.port}/docs`)
 })

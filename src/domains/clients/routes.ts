@@ -1,25 +1,16 @@
-import { Hono } from "hono"
-import { z } from "zod"
 import type { SidecarEnv } from "../../sidecar/pop.js"
-import { requireAnyPermission } from "../../sidecar/permissions.js"
-import { requireMutationPermission } from "../../sidecar/mutationPermission.js"
-import {
-  CLIENT_CREATE,
-  CLIENT_DELETE,
-  CLIENT_READ,
-  CLIENT_UPDATE,
-} from "./allowlist.js"
+import { createOpenApiApp } from "../../openapi/app.js"
+import { apiFail } from "../../openapi/respond.js"
 import { createClient, deleteClient, updateClient } from "./mutations.js"
 import { listClients } from "./queries.js"
 import { parsePatchBody } from "../../lib/patchBody.js"
 import {
-  deleteClientBodySchema,
-  listClientsQuerySchema,
-  toListClientsQuery,
-  upsertClientBodySchema,
-} from "./schema.js"
-
-const idSchema = z.string().uuid()
+  createClientRoute,
+  deleteClientRoute,
+  listClientsRoute,
+  patchClientRoute,
+} from "./openapi.js"
+import { toListClientsQuery, upsertClientBodySchema } from "./schema.js"
 
 function clientCaps(sidecar: { keys: string[]; isOwner: boolean }) {
   const can = (action: string) =>
@@ -31,108 +22,59 @@ function clientCaps(sidecar: { keys: string[]; isOwner: boolean }) {
   }
 }
 
-export const clientRoutes = new Hono<SidecarEnv>()
+export const clientRoutes = createOpenApiApp<SidecarEnv>()
 
-clientRoutes.get("/", requireAnyPermission(CLIENT_READ), async (c) => {
-  const parsed = listClientsQuerySchema.safeParse({
-    page: c.req.query("page") || undefined,
-    pageSize: c.req.query("pageSize") || undefined,
-    q: c.req.query("q") || undefined,
-    soloActivos: c.req.query("soloActivos") || undefined,
-    withEmail: c.req.query("withEmail") || undefined,
-    withTaxId: c.req.query("withTaxId") || undefined,
-    sort: c.req.query("sort") || undefined,
-    ord: c.req.query("ord") || undefined,
-  })
-  if (!parsed.success) {
-    return c.json({ success: false, error: "Parámetros inválidos" }, 400)
-  }
-
+clientRoutes.openapi(listClientsRoute, async (c) => {
   const result = await listClients(
     c.get("supabase"),
     c.get("sidecar").popId,
-    toListClientsQuery(parsed.data),
+    toListClientsQuery(c.req.valid("query")),
     clientCaps(c.get("sidecar")),
   )
-  if (!result.success) return c.json(result, 500)
-  return c.json(result)
+  if (!result.success) return apiFail(c, result.error, 500)
+  return c.json(result, 200)
 })
 
-clientRoutes.post("/", requireMutationPermission(CLIENT_CREATE), async (c) => {
-  const body = upsertClientBodySchema.safeParse(
-    await c.req.json().catch(() => null),
-  )
-  if (!body.success) {
-    return c.json(
-      { success: false, error: body.error.issues[0]?.message ?? "Body inválido" },
-      400,
-    )
-  }
+clientRoutes.openapi(createClientRoute, async (c) => {
   const result = await createClient(
     c.get("supabase"),
     c.get("sidecar").popId,
+    c.req.valid("json"),
+    c.get("mutationAudit"),
+  )
+  if (!result.success) return apiFail(c, result.error, result.status)
+  if (!result.id) return apiFail(c, "Error interno", 500)
+  return c.json({ success: true as const, id: result.id }, 201)
+})
+
+clientRoutes.openapi(patchClientRoute, async (c) => {
+  const { clientId } = c.req.valid("param")
+  const body = parsePatchBody(
+    upsertClientBodySchema,
+    await c.req.json().catch(() => null),
+  )
+  if (!body.success) return apiFail(c, body.error, 400)
+  const result = await updateClient(
+    c.get("supabase"),
+    c.get("sidecar").popId,
+    clientId,
     body.data,
     c.get("mutationAudit"),
   )
-  if (!result.success) return c.json(result, result.status)
-  return c.json(result, 201)
+  if (!result.success) return apiFail(c, result.error, result.status)
+  return c.json({ success: true as const }, 200)
 })
 
-clientRoutes.patch(
-  "/:clientId",
-  requireMutationPermission(CLIENT_UPDATE),
-  async (c) => {
-    const id = idSchema.safeParse(c.req.param("clientId"))
-    if (!id.success) {
-      return c.json({ success: false, error: "clientId inválido" }, 400)
-    }
-    const body = parsePatchBody(
-      upsertClientBodySchema,
-      await c.req.json().catch(() => null),
-    )
-    if (!body.success) {
-      return c.json({ success: false, error: body.error }, 400)
-    }
-    const result = await updateClient(
-      c.get("supabase"),
-      c.get("sidecar").popId,
-      id.data,
-      body.data,
-      c.get("mutationAudit"),
-    )
-    if (!result.success) return c.json(result, result.status)
-    return c.json(result)
-  },
-)
-
-clientRoutes.delete(
-  "/:clientId",
-  requireMutationPermission(CLIENT_DELETE),
-  async (c) => {
-    const id = idSchema.safeParse(c.req.param("clientId"))
-    if (!id.success) {
-      return c.json({ success: false, error: "clientId inválido" }, 400)
-    }
-    const body = deleteClientBodySchema.safeParse(
-      await c.req.json().catch(() => ({ confirmationTyped: "" })),
-    )
-    if (!body.success) {
-      return c.json(
-        {
-          success: false,
-          error: body.error.issues[0]?.message ?? "Body inválido",
-        },
-        400,
-      )
-    }
-    const result = await deleteClient(
-      c.get("supabase"),
-      c.get("sidecar").popId,
-      id.data,
-      body.data.confirmationTyped,
-      c.get("mutationAudit"),
-    )
-    if (!result.success) return c.json(result, result.status)
-    return c.json(result)
-  },
-)
+clientRoutes.openapi(deleteClientRoute, async (c) => {
+  const { clientId } = c.req.valid("param")
+  const { confirmationTyped } = c.req.valid("json")
+  const result = await deleteClient(
+    c.get("supabase"),
+    c.get("sidecar").popId,
+    clientId,
+    confirmationTyped,
+    c.get("mutationAudit"),
+  )
+  if (!result.success) return apiFail(c, result.error, result.status)
+  return c.json({ success: true as const }, 200)
+})

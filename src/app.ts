@@ -1,5 +1,8 @@
-import { Hono } from "hono"
+import { createRoute, z } from "@hono/zod-openapi"
 import { requirePrivateAuth, type PrivateAuthEnv } from "./auth/private.js"
+import { createOpenApiApp } from "./openapi/app.js"
+import { catalogUndocumentedRoutes } from "./openapi/catalog.js"
+import { registerOpenApiDocs } from "./openapi/register.js"
 import { meRoutes } from "./domains/me/routes.js"
 import { articleRoutes } from "./domains/articles/routes.js"
 import { categoryRoutes } from "./domains/categories/routes.js"
@@ -33,6 +36,10 @@ import { hrRoutes } from "./domains/hr/routes.js"
 import { manufacturingRoutes } from "./domains/manufacturing/routes.js"
 import { chatRoutes } from "./domains/chat/routes.js"
 import { saleRoutes } from "./domains/sale/routes.js"
+import { menuCatalogRoutes } from "./domains/menu-catalog/routes.js"
+import { mostradorRoutes } from "./domains/mostrador/routes.js"
+import { mesasRoutes } from "./domains/mesas/routes.js"
+import { comandasRoutes } from "./domains/comandas/routes.js"
 import { auditRoutes } from "./domains/audit/routes.js"
 import { meApprovalCodeRoutes } from "./domains/me-approval-code/routes.js"
 import { getEnv } from "./env.js"
@@ -45,8 +52,26 @@ import {
 } from "./realtime/routes.js"
 import { requirePopSidecar, type SidecarEnv } from "./sidecar/pop.js"
 
+const healthRoute = createRoute({
+  method: "get",
+  path: "/health",
+  tags: ["Salud"],
+  summary: "Liveness",
+  description: "Sin autenticación. Para probes y para ver si el proceso está arriba.",
+  responses: {
+    200: {
+      description: "OK",
+      content: {
+        "application/json": {
+          schema: z.object({ ok: z.literal(true) }).openapi("Health"),
+        },
+      },
+    },
+  },
+})
+
 export function createApp() {
-  const app = new Hono<{ Bindings: RealtimeBindings }>()
+  const app = createOpenApiApp<{ Bindings: RealtimeBindings }>()
 
   app.onError((err, c) => {
     if (c.finalized) return c.res
@@ -56,11 +81,11 @@ export function createApp() {
     return c.json({ success: false, error: "Error interno" }, 500)
   })
 
-  app.get("/health", (c) => c.json({ ok: true }))
+  app.openapi(healthRoute, (c) => c.json({ ok: true as const }, 200))
   app.get("/ping", (c) => c.json({ pong: true }))
   app.route("/realtime/pops/:popId", realtimeWsRoutes)
 
-  const v1 = new Hono<PrivateAuthEnv>()
+  const v1 = createOpenApiApp<PrivateAuthEnv>()
   v1.use("*", (c, next) =>
     requireRequestTimeout(getEnv().REQUEST_TIMEOUT_MS)(c, next),
   )
@@ -68,7 +93,7 @@ export function createApp() {
 
   v1.route("/me", meRoutes)
 
-  const pop = new Hono<SidecarEnv>()
+  const pop = createOpenApiApp<SidecarEnv>()
   pop.use("*", requirePopSidecar)
   pop.route("/audit", auditRoutes)
   pop.route("/me/approval-code", meApprovalCodeRoutes)
@@ -104,10 +129,16 @@ export function createApp() {
   pop.route("/manufacturing", manufacturingRoutes)
   pop.route("/chat", chatRoutes)
   pop.route("/sale", saleRoutes)
+  pop.route("/menu-catalog", menuCatalogRoutes)
+  pop.route("/mostrador", mostradorRoutes)
+  pop.route("/mesas", mesasRoutes)
+  pop.route("/comandas", comandasRoutes)
   pop.route("/realtime", realtimePublishRoutes)
 
   v1.route("/pops/:popId", pop)
   app.route("/v1", v1)
+  const extraTags = catalogUndocumentedRoutes(app)
+  registerOpenApiDocs(app, extraTags)
 
   return app
 }

@@ -1,8 +1,10 @@
-import { Hono } from "hono"
+import type { z } from "zod"
 import type { SidecarEnv } from "../../sidecar/pop.js"
-import { requireAnyPermission } from "../../sidecar/permissions.js"
+import { createOpenApiApp } from "../../openapi/app.js"
+import { apiFail } from "../../openapi/respond.js"
+import { routeInput } from "../../openapi/valid.js"
 import { loadExpensePaymentContext } from "../expenses/paymentContext.js"
-import { SALE_CREATE, SALE_READ } from "./allowlist.js"
+import { SALE_CREATE } from "./allowlist.js"
 import {
   findSaleCatalogArticleByScan,
   loadSaleCatalog,
@@ -11,12 +13,18 @@ import {
 } from "./catalog.js"
 import { loadSaleComprobantes } from "./comprobantes.js"
 import {
+  saleCatalogArticlesRoute,
+  saleCatalogItemsRoute,
+  saleCatalogRoute,
+  saleCatalogScanRoute,
+  saleComprobantesRoute,
+  salePaymentContextRoute,
+} from "./openapi.js"
+import {
   saleCatalogArticlesQuerySchema,
-  saleCatalogItemsQuerySchema,
   saleCatalogScanQuerySchema,
+  type SaleCatalogItemsQuery,
 } from "./schema.js"
-
-export const saleRoutes = new Hono<SidecarEnv>()
 
 function saleCaps(sidecar: { keys: string[]; isOwner: boolean }) {
   return {
@@ -25,7 +33,9 @@ function saleCaps(sidecar: { keys: string[]; isOwner: boolean }) {
   }
 }
 
-saleRoutes.get("/catalog", requireAnyPermission(SALE_READ), async (c) => {
+export const saleRoutes = createOpenApiApp<SidecarEnv>()
+
+saleRoutes.openapi(saleCatalogRoute, async (c) => {
   const sidecar = c.get("sidecar")
   const result = await loadSaleCatalog(
     c.get("supabase"),
@@ -33,40 +43,26 @@ saleRoutes.get("/catalog", requireAnyPermission(SALE_READ), async (c) => {
     c.get("userId"),
     saleCaps(sidecar),
   )
-  if (!result.success) return c.json(result, 500)
-  return c.json(result)
+  if (!result.success) return apiFail(c, result.error, 500)
+  return c.json(result, 200)
 })
 
-saleRoutes.get("/catalog/items", requireAnyPermission(SALE_READ), async (c) => {
-  const parsed = saleCatalogItemsQuerySchema.safeParse({
-    section: c.req.query("section") || undefined,
-    categoryId: c.req.query("categoryId") || undefined,
-    categoryIds: c.req.query("categoryIds") || undefined,
-    search: c.req.query("search") || undefined,
-    priceListId: c.req.query("priceListId") || undefined,
-    offset: c.req.query("offset") || undefined,
-  })
-  if (!parsed.success) {
-    return c.json({ success: false, error: "Parámetros inválidos" }, 400)
-  }
+saleRoutes.openapi(saleCatalogItemsRoute, async (c) => {
   const result = await loadSaleCatalogItemsPage(
     c.get("supabase"),
     c.get("sidecar").popId,
-    parsed.data,
+    routeInput<SaleCatalogItemsQuery>(c, "query"),
   )
-  if (!result.success) return c.json(result, 500)
-  return c.json(result)
+  if (!result.success) return apiFail(c, result.error, 500)
+  return c.json(result, 200)
 })
 
-saleRoutes.get("/catalog/articles", requireAnyPermission(SALE_READ), async (c) => {
-  const parsed = saleCatalogArticlesQuerySchema.safeParse({
-    ids: c.req.query("ids") || undefined,
-    priceListId: c.req.query("priceListId") || undefined,
-  })
-  if (!parsed.success) {
-    return c.json({ success: false, error: "Parámetros inválidos" }, 400)
-  }
-  const ids = parsed.data.ids
+saleRoutes.openapi(saleCatalogArticlesRoute, async (c) => {
+  const parsed = routeInput<z.infer<typeof saleCatalogArticlesQuerySchema>>(
+    c,
+    "query",
+  )
+  const ids = parsed.ids
     .split(",")
     .map((id) => id.trim())
     .filter(Boolean)
@@ -74,48 +70,41 @@ saleRoutes.get("/catalog/articles", requireAnyPermission(SALE_READ), async (c) =
     c.get("supabase"),
     c.get("sidecar").popId,
     ids,
-    parsed.data.priceListId,
+    parsed.priceListId,
   )
-  if (!result.success) return c.json(result, 500)
-  return c.json(result)
+  if (!result.success) return apiFail(c, result.error, 500)
+  return c.json(result, 200)
 })
 
-saleRoutes.get("/catalog/scan", requireAnyPermission(SALE_READ), async (c) => {
-  const parsed = saleCatalogScanQuerySchema.safeParse({
-    q: c.req.query("q") || undefined,
-    priceListId: c.req.query("priceListId") || undefined,
-  })
-  if (!parsed.success) {
-    return c.json({ success: false, error: "Parámetros inválidos" }, 400)
-  }
+saleRoutes.openapi(saleCatalogScanRoute, async (c) => {
+  const parsed = routeInput<z.infer<typeof saleCatalogScanQuerySchema>>(
+    c,
+    "query",
+  )
   const result = await findSaleCatalogArticleByScan(
     c.get("supabase"),
     c.get("sidecar").popId,
-    parsed.data.q,
-    parsed.data.priceListId,
+    parsed.q,
+    parsed.priceListId,
   )
-  if (!result.success) return c.json(result, 500)
-  return c.json(result)
+  if (!result.success) return apiFail(c, result.error, 500)
+  return c.json(result, 200)
 })
 
-saleRoutes.get(
-  "/payment-context",
-  requireAnyPermission(SALE_READ),
-  async (c) => {
-    const result = await loadExpensePaymentContext(
-      c.get("supabase"),
-      c.get("sidecar").popId,
-    )
-    if (!result.success) return c.json(result, 500)
-    return c.json(result)
-  },
-)
+saleRoutes.openapi(salePaymentContextRoute, async (c) => {
+  const result = await loadExpensePaymentContext(
+    c.get("supabase"),
+    c.get("sidecar").popId,
+  )
+  if (!result.success) return apiFail(c, result.error, 500)
+  return c.json(result, 200)
+})
 
-saleRoutes.get("/comprobantes", requireAnyPermission(SALE_READ), async (c) => {
+saleRoutes.openapi(saleComprobantesRoute, async (c) => {
   const result = await loadSaleComprobantes(
     c.get("supabase"),
     c.get("sidecar").popId,
   )
-  if (!result.success) return c.json(result, 500)
-  return c.json(result)
+  if (!result.success) return apiFail(c, result.error, 500)
+  return c.json(result, 200)
 })

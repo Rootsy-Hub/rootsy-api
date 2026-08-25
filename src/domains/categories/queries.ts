@@ -7,7 +7,7 @@ import {
   auditedUpdate,
 } from "../../audit/simpleWrite.js"
 import type { AuditOp, MutationAuditCtx } from "../../audit/types.js"
-import type { CategoryRow } from "./schema.js"
+import type { CategoryDetail, CategoryRow } from "./schema.js"
 
 const SELECT =
   "id, pop_id, name, item_kind, visible, show_in_sale, show_in_menu, sort_order, created_at, updated_at"
@@ -66,8 +66,6 @@ export async function listCategories(
   if (error) return { success: false, error: error.message }
   return { success: true, data: (data ?? []).map((row) => mapRow(row as CategoryDbRow)) }
 }
-
-export type CategoryDetail = CategoryRow & { articleCount: number }
 
 export async function getCategory(
   supabase: SupabaseClient,

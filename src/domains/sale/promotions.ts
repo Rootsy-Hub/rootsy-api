@@ -370,3 +370,16 @@ export function splitSalePromotions(all: SalePromotion[]): {
   )
   return { promotions, quantityDeals }
 }
+
+/** Mesas / Mostrador: combos con recetas incluidas. */
+export function splitMenuPromotions(all: SalePromotion[]): {
+  promotions: SalePromotion[]
+  quantityDeals: SalePromotion[]
+} {
+  return {
+    promotions: all.filter((p) => p.promotionType === "combo" && p.showInMenu),
+    quantityDeals: all.filter(
+      (p) => p.promotionType === "quantity_deal" && p.autoApply,
+    ),
+  }
+}

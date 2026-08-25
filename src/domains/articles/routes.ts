@@ -1,26 +1,25 @@
-import { Hono } from "hono"
-import { z } from "zod"
+import type { z } from "zod"
 import type { SidecarEnv } from "../../sidecar/pop.js"
-import { requireAnyPermission } from "../../sidecar/permissions.js"
-import { requireMutationPermission } from "../../sidecar/mutationPermission.js"
-import {
-  ARTICLE_CREATE,
-  ARTICLE_DELETE,
-  ARTICLE_READ,
-  ARTICLE_UPDATE,
-} from "./allowlist.js"
+import { createOpenApiApp } from "../../openapi/app.js"
+import { apiFail } from "../../openapi/respond.js"
+import { routeInput, routeParam } from "../../openapi/valid.js"
+import { parsePatchBody } from "../../lib/patchBody.js"
 import { uploadArticleImage } from "./image.js"
 import { createArticle, deleteArticle, updateArticle } from "./mutations.js"
 import { getArticle, listArticles } from "./queries.js"
-import { parsePatchBody } from "../../lib/patchBody.js"
 import {
-  deleteArticleBodySchema,
+  createArticleRoute,
+  deleteArticleRoute,
+  getArticleRoute,
+  listArticlesRoute,
+  patchArticleRoute,
+  uploadArticleImageRoute,
+} from "./openapi.js"
+import {
   listArticlesQuerySchema,
   toListArticlesQuery,
   upsertArticleBodySchema,
 } from "./schema.js"
-
-const idSchema = z.string().uuid()
 
 function articleCaps(sidecar: { keys: string[]; isOwner: boolean }) {
   const can = (action: string) =>
@@ -34,148 +33,87 @@ function articleCaps(sidecar: { keys: string[]; isOwner: boolean }) {
   }
 }
 
-export const articleRoutes = new Hono<SidecarEnv>()
+export const articleRoutes = createOpenApiApp<SidecarEnv>()
 
-articleRoutes.get("/", requireAnyPermission(ARTICLE_READ), async (c) => {
-  const parsed = listArticlesQuerySchema.safeParse({
-    page: c.req.query("page") || undefined,
-    pageSize: c.req.query("pageSize") || undefined,
-    q: c.req.query("q") || undefined,
-    soloActivos: c.req.query("soloActivos") || undefined,
-    soloInactivos: c.req.query("soloInactivos") || undefined,
-    conDescuento: c.req.query("conDescuento") || undefined,
-    sinDescuento: c.req.query("sinDescuento") || undefined,
-    conStock: c.req.query("conStock") || undefined,
-    sinStock: c.req.query("sinStock") || undefined,
-    stockNegativo: c.req.query("stockNegativo") || undefined,
-    ventaSinStock: c.req.query("ventaSinStock") || undefined,
-    categoryId: c.req.query("categoryId") || undefined,
-    itemKinds: c.req.query("itemKinds") || undefined,
-    sort: c.req.query("sort") || undefined,
-    ord: c.req.query("ord") || undefined,
-  })
-  if (!parsed.success) {
-    return c.json({ success: false, error: "Parámetros inválidos" }, 400)
-  }
-
+articleRoutes.openapi(listArticlesRoute, async (c) => {
   const result = await listArticles(
     c.get("supabase"),
     c.get("sidecar").popId,
-    toListArticlesQuery(parsed.data),
+    toListArticlesQuery(
+      routeInput<z.infer<typeof listArticlesQuerySchema>>(c, "query"),
+    ),
     articleCaps(c.get("sidecar")),
   )
-  if (!result.success) return c.json(result, 500)
-  return c.json(result)
+  if (!result.success) return apiFail(c, result.error, 500)
+  return c.json(result, 200)
 })
 
-articleRoutes.post("/", requireMutationPermission(ARTICLE_CREATE), async (c) => {
-  const body = upsertArticleBodySchema.safeParse(await c.req.json().catch(() => null))
-  if (!body.success) {
-    return c.json(
-      { success: false, error: body.error.issues[0]?.message ?? "Body inválido" },
-      400,
-    )
-  }
+articleRoutes.openapi(createArticleRoute, async (c) => {
   const sidecar = c.get("sidecar")
   const result = await createArticle(
     c.get("supabase"),
     sidecar.popId,
     sidecar.popSiteId,
     c.get("userId"),
-    body.data,
+    routeInput<z.infer<typeof upsertArticleBodySchema>>(c, "json"),
     c.get("mutationAudit"),
   )
-  if (!result.success) return c.json(result, result.status)
+  if (!result.success) return apiFail(c, result.error, result.status)
+  return c.json({ success: true as const }, 201)
+})
+
+articleRoutes.openapi(uploadArticleImageRoute, async (c) => {
+  const body = await c.req.parseBody()
+  const file = body.file
+  if (!(file instanceof File)) {
+    return apiFail(c, "Elegí una imagen para subir.", 400)
+  }
+  const result = await uploadArticleImage(
+    c.get("supabase"),
+    c.get("sidecar").popId,
+    file,
+  )
+  if (!result.success) return apiFail(c, result.error, result.status)
   return c.json(result, 201)
 })
 
-articleRoutes.post(
-  "/image",
-  requireAnyPermission([...ARTICLE_CREATE, ...ARTICLE_UPDATE]),
-  async (c) => {
-    const body = await c.req.parseBody()
-    const file = body.file
-    if (!(file instanceof File)) {
-      return c.json({ success: false, error: "Elegí una imagen para subir." }, 400)
-    }
-    const result = await uploadArticleImage(
-      c.get("supabase"),
-      c.get("sidecar").popId,
-      file,
-    )
-    if (!result.success) return c.json(result, result.status)
-    return c.json(result, 201)
-  },
-)
-
-articleRoutes.get("/:articleId", requireAnyPermission(ARTICLE_READ), async (c) => {
-  const id = idSchema.safeParse(c.req.param("articleId"))
-  if (!id.success) {
-    return c.json({ success: false, error: "articleId inválido" }, 400)
-  }
+articleRoutes.openapi(getArticleRoute, async (c) => {
   const result = await getArticle(
     c.get("supabase"),
     c.get("sidecar").popId,
-    id.data,
+    routeParam(c, "articleId"),
   )
-  if (!result.success) return c.json(result, result.status)
-  return c.json(result)
+  if (!result.success) return apiFail(c, result.error, result.status)
+  return c.json(result, 200)
 })
 
-articleRoutes.patch(
-  "/:articleId",
-  requireMutationPermission(ARTICLE_UPDATE),
-  async (c) => {
-    const id = idSchema.safeParse(c.req.param("articleId"))
-    if (!id.success) {
-      return c.json({ success: false, error: "articleId inválido" }, 400)
-    }
-    const body = parsePatchBody(
-      upsertArticleBodySchema,
-      await c.req.json().catch(() => null),
-    )
-    if (!body.success) {
-      return c.json({ success: false, error: body.error }, 400)
-    }
-    const sidecar = c.get("sidecar")
-    const result = await updateArticle(
-      c.get("supabase"),
-      sidecar.popId,
-      sidecar.popSiteId,
-      id.data,
-      body.data,
-      c.get("mutationAudit"),
-    )
-    if (!result.success) return c.json(result, result.status)
-    return c.json(result)
-  },
-)
+articleRoutes.openapi(patchArticleRoute, async (c) => {
+  const body = parsePatchBody(
+    upsertArticleBodySchema,
+    await c.req.json().catch(() => null),
+  )
+  if (!body.success) return apiFail(c, body.error, 400)
+  const sidecar = c.get("sidecar")
+  const result = await updateArticle(
+    c.get("supabase"),
+    sidecar.popId,
+    sidecar.popSiteId,
+    routeParam(c, "articleId"),
+    body.data,
+    c.get("mutationAudit"),
+  )
+  if (!result.success) return apiFail(c, result.error, result.status)
+  return c.json({ success: true as const }, 200)
+})
 
-articleRoutes.delete(
-  "/:articleId",
-  requireMutationPermission(ARTICLE_DELETE),
-  async (c) => {
-    const id = idSchema.safeParse(c.req.param("articleId"))
-    if (!id.success) {
-      return c.json({ success: false, error: "articleId inválido" }, 400)
-    }
-    const body = deleteArticleBodySchema.safeParse(
-      await c.req.json().catch(() => ({ confirmationTyped: "" })),
-    )
-    if (!body.success) {
-      return c.json(
-        { success: false, error: body.error.issues[0]?.message ?? "Body inválido" },
-        400,
-      )
-    }
-    const result = await deleteArticle(
-      c.get("supabase"),
-      c.get("sidecar").popId,
-      id.data,
-      body.data.confirmationTyped,
-      c.get("mutationAudit"),
-    )
-    if (!result.success) return c.json(result, result.status)
-    return c.json(result)
-  },
-)
+articleRoutes.openapi(deleteArticleRoute, async (c) => {
+  const result = await deleteArticle(
+    c.get("supabase"),
+    c.get("sidecar").popId,
+    routeParam(c, "articleId"),
+    routeInput<{ confirmationTyped: string }>(c, "json").confirmationTyped,
+    c.get("mutationAudit"),
+  )
+  if (!result.success) return apiFail(c, result.error, result.status)
+  return c.json({ success: true as const }, 200)
+})

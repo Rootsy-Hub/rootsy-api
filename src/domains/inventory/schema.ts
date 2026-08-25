@@ -130,7 +130,7 @@ export const INVENTORY_ROW_VIEWS = [
 ] as const
 
 export const listRowsQuerySchema = z.object({
-  view: z.enum(INVENTORY_ROW_VIEWS),
+  view: z.enum(INVENTORY_ROW_VIEWS).optional().default("pantry"),
   q: z.string().trim().max(80).optional().default(""),
   page: z.coerce.number().int().min(1).optional().default(1),
   pageSize: z.coerce.number().int().min(1).max(50).optional().default(25),
