@@ -55,3 +55,14 @@ export async function publishArticleEvent(
     require: { permissions: [...CATALOG_REALTIME_READ] },
   })
 }
+
+export async function publishArticleEventBestEffort(
+  c: Context<SidecarEnv>,
+  input: Parameters<typeof publishArticleEvent>[1],
+): Promise<void> {
+  try {
+    await publishArticleEvent(c, input)
+  } catch {
+    /* el PATCH no falla si el aviso no sale */
+  }
+}

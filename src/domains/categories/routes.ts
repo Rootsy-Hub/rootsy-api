@@ -13,7 +13,7 @@ import {
 } from "./queries.js"
 import {
   categoryRealtimePayload,
-  publishCategoryEvent,
+  publishCategoryEventBestEffort,
 } from "./realtime.js"
 import {
   createCategoryRoute,
@@ -53,11 +53,11 @@ categoryRoutes.openapi(createCategoryRoute, async (c) => {
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, 500)
-  void publishCategoryEvent(c, {
+  await publishCategoryEventBestEffort(c, {
     type: "categories.created",
     categoryId: result.data.id,
     payload: categoryRealtimePayload(result.data),
-  }).catch(() => undefined)
+  })
   return c.json(result, 201)
 })
 
@@ -75,11 +75,11 @@ categoryRoutes.openapi(layoutCategoriesRoute, async (c) => {
   for (const update of body.updates) {
     const row = await getCategory(supabase, popId, update.id)
     if (!row.success) continue
-    void publishCategoryEvent(c, {
+    await publishCategoryEventBestEffort(c, {
       type: "categories.updated",
       categoryId: update.id,
       payload: categoryRealtimePayload(row.data),
-    }).catch(() => undefined)
+    })
   }
   return c.json({ success: true as const }, 200)
 })
@@ -103,11 +103,11 @@ categoryRoutes.openapi(updateCategoryRoute, async (c) => {
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
-  void publishCategoryEvent(c, {
+  await publishCategoryEventBestEffort(c, {
     type: "categories.updated",
     categoryId: result.data.id,
     payload: categoryRealtimePayload(result.data),
-  }).catch(() => undefined)
+  })
   return c.json(result, 200)
 })
 
@@ -120,10 +120,10 @@ categoryRoutes.openapi(deleteCategoryRoute, async (c) => {
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
-  void publishCategoryEvent(c, {
+  await publishCategoryEventBestEffort(c, {
     type: "categories.deleted",
     categoryId,
     payload: { categoryId },
-  }).catch(() => undefined)
+  })
   return c.json({ success: true as const }, 200)
 })

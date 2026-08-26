@@ -49,3 +49,14 @@ export async function publishCategoryEvent(
     require: { permissions: [...CATALOG_REALTIME_READ] },
   })
 }
+
+export async function publishCategoryEventBestEffort(
+  c: Context<SidecarEnv>,
+  input: Parameters<typeof publishCategoryEvent>[1],
+): Promise<void> {
+  try {
+    await publishCategoryEvent(c, input)
+  } catch {
+    /* el save no falla si el aviso no sale */
+  }
+}

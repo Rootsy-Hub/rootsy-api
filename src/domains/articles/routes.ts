@@ -9,7 +9,7 @@ import { createArticle, deleteArticle, updateArticle } from "./mutations.js"
 import { getArticle, listArticles } from "./queries.js"
 import {
   articleRealtimeSnapshot,
-  publishArticleEvent,
+  publishArticleEventBestEffort,
 } from "./realtime.js"
 import {
   createArticleRoute,
@@ -66,11 +66,11 @@ articleRoutes.openapi(createArticleRoute, async (c) => {
   if (result.articleId) {
     const row = await getArticle(c.get("supabase"), sidecar.popId, result.articleId)
     if (row.success) {
-      void publishArticleEvent(c, {
+      await publishArticleEventBestEffort(c, {
         type: "articles.created",
         articleId: result.articleId,
         payload: { article: articleRealtimeSnapshot(row.data) },
-      }).catch(() => undefined)
+      })
     }
   }
   return c.json({ success: true as const }, 201)
@@ -120,11 +120,11 @@ articleRoutes.openapi(patchArticleRoute, async (c) => {
   if (!result.success) return apiFail(c, result.error, result.status)
   const row = await getArticle(c.get("supabase"), sidecar.popId, articleId)
   if (row.success) {
-    void publishArticleEvent(c, {
+    await publishArticleEventBestEffort(c, {
       type: "articles.updated",
       articleId,
       payload: { article: articleRealtimeSnapshot(row.data) },
-    }).catch(() => undefined)
+    })
   }
   return c.json({ success: true as const }, 200)
 })
@@ -139,10 +139,10 @@ articleRoutes.openapi(deleteArticleRoute, async (c) => {
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
-  void publishArticleEvent(c, {
+  await publishArticleEventBestEffort(c, {
     type: "articles.deleted",
     articleId,
     payload: { articleId },
-  }).catch(() => undefined)
+  })
   return c.json({ success: true as const }, 200)
 })
