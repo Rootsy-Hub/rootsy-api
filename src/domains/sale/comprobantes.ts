@@ -28,6 +28,39 @@ function emisorIvaFromSettings(
   return raw === "monotributo" ? "monotributo" : "responsable_inscripto"
 }
 
+function emisorIvaLabel(
+  emisor: "responsable_inscripto" | "monotributo",
+  validCuit: boolean,
+): string {
+  if (!validCuit) return "—"
+  return emisor === "monotributo" ? "Monotributo" : "IVA Responsable Inscripto"
+}
+
+function textOrNull(raw: unknown): string | null {
+  const value = String(raw ?? "").trim()
+  return value || null
+}
+
+function popAddress(
+  row: {
+    street_address?: string | null
+    city?: string | null
+    state?: string | null
+    country?: string | null
+    settings?: unknown
+  },
+): string | null {
+  const line = [row.street_address, row.city, row.state, row.country]
+    .map((part) => String(part ?? "").trim())
+    .filter(Boolean)
+    .join(", ")
+  if (line) return line
+  if (row.settings != null && typeof row.settings === "object") {
+    return textOrNull((row.settings as Record<string, unknown>).address)
+  }
+  return null
+}
+
 function buildOptions(
   emisor: "responsable_inscripto" | "monotributo",
   validCuit: boolean,
@@ -56,17 +89,35 @@ export async function loadSaleComprobantes(
   | { success: true; data: SaleComprobantesData }
   | { success: false; error: string }
 > {
-  const { data, error } = await supabase
-    .from("pops")
-    .select("fiscal_cuit, settings")
-    .eq("id", popId)
-    .maybeSingle()
+  const [popRes, salePointRes] = await Promise.all([
+    supabase
+      .from("pops")
+      .select(
+        "name, fiscal_cuit, fiscal_razon_social, street_address, city, state, country, phone, fiscal_ingresos_brutos_text, fiscal_inicio_actividades_date, settings",
+      )
+      .eq("id", popId)
+      .maybeSingle(),
+    supabase
+      .from("arca_sale_points")
+      .select("pto_vta")
+      .eq("pop_id", popId)
+      .order("pto_vta", { ascending: true })
+      .limit(1)
+      .maybeSingle(),
+  ])
 
-  if (error) return { success: false, error: error.message }
-  if (!data) return { success: false, error: "Punto de venta no encontrado" }
+  if (popRes.error) return { success: false, error: popRes.error.message }
+  if (!popRes.data) return { success: false, error: "Punto de venta no encontrado" }
 
+  const data = popRes.data
   const validCuit = hasValidFiscalCuit(data.fiscal_cuit)
   const emisorIvaCondition = emisorIvaFromSettings(data.settings, validCuit)
+  const tradeName = textOrNull(data.name) || "Comercio"
+  let arcaPtoVta: number | null = null
+  if (salePointRes.data?.pto_vta != null) {
+    const parsed = Number(salePointRes.data.pto_vta)
+    if (Number.isFinite(parsed)) arcaPtoVta = parsed
+  }
   return {
     success: true,
     data: {
@@ -74,6 +125,21 @@ export async function loadSaleComprobantes(
       hasValidFiscalCuit: validCuit,
       emisorIvaCondition,
       options: buildOptions(emisorIvaCondition, validCuit),
+      emitter: {
+        tradeName,
+        razonSocial: textOrNull(data.fiscal_razon_social) || tradeName,
+        address: popAddress(data),
+        cuit: textOrNull(data.fiscal_cuit),
+        ingresosBrutos: textOrNull(data.fiscal_ingresos_brutos_text),
+        inicioActividades: data.fiscal_inicio_actividades_date
+          ? String(data.fiscal_inicio_actividades_date).slice(0, 10)
+          : null,
+        phone: textOrNull(data.phone),
+        arcaPtoVta,
+        ivaCondition: emisorIvaCondition,
+        ivaConditionLabel: emisorIvaLabel(emisorIvaCondition, validCuit),
+        hasValidFiscalCuit: validCuit,
+      },
     },
   }
 }

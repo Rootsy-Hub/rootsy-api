@@ -185,12 +185,29 @@ export const saleCatalogItemsPageSchema = z
   })
   .openapi("SaleCatalogItemsPage")
 
+export const saleComprobanteEmitterSchema = z
+  .object({
+    tradeName: z.string(),
+    razonSocial: z.string(),
+    address: z.string().nullable(),
+    cuit: z.string().nullable(),
+    ingresosBrutos: z.string().nullable(),
+    inicioActividades: z.string().nullable(),
+    phone: z.string().nullable(),
+    arcaPtoVta: z.number().nullable(),
+    ivaCondition: z.enum(["responsable_inscripto", "monotributo"]),
+    ivaConditionLabel: z.string(),
+    hasValidFiscalCuit: z.boolean(),
+  })
+  .openapi("SaleComprobanteEmitter")
+
 export const saleComprobantesDataSchema = z
   .object({
     invoiceTypeSiteId: z.string(),
     hasValidFiscalCuit: z.boolean(),
     emisorIvaCondition: z.enum(["responsable_inscripto", "monotributo"]),
     options: z.array(saleComprobanteOptionSchema),
+    emitter: saleComprobanteEmitterSchema,
   })
   .openapi("SaleComprobantesData")
 

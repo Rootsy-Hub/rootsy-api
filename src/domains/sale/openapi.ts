@@ -84,5 +84,6 @@ export const saleComprobantesRoute = documentedRoute({
   description: "Toolbox: `sale:read`, `mostrador:read` o `mesas:read`.",
   middleware: toolbox,
   success: saleComprobantesResponseSchema,
-  successDescription: "Opciones de comprobante según el emisor.",
+  successDescription:
+    "Opciones de comprobante y datos fiscales del emisor para la vista previa.",
 })
