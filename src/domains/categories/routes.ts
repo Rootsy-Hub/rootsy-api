@@ -70,17 +70,15 @@ categoryRoutes.openapi(layoutCategoriesRoute, async (c) => {
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  const supabase = c.get("supabase")
+  const popId = c.get("sidecar").popId
   for (const update of body.updates) {
+    const row = await getCategory(supabase, popId, update.id)
+    if (!row.success) continue
     void publishCategoryEvent(c, {
       type: "categories.updated",
       categoryId: update.id,
-      payload: {
-        category: {
-          id: update.id,
-          sortOrder: update.sortOrder,
-          showInSale: update.showInSale,
-        },
-      },
+      payload: categoryRealtimePayload(row.data),
     }).catch(() => undefined)
   }
   return c.json({ success: true as const }, 200)

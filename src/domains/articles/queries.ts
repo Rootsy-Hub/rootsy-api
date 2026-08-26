@@ -313,11 +313,15 @@ async function enrichArticles(
   supabase: SupabaseClient,
   popId: string,
   rows: Record<string, unknown>[],
+  options?: { includeStock?: boolean },
 ): Promise<ArticleRow[]> {
+  const includeStock = options?.includeStock ?? true
   const bases = rows.map((row) => mapArticleBase(row))
   const ids = bases.map((row) => row.id)
   const [stockById, costsById, pricesById] = await Promise.all([
-    stockOnHandByArticleIds(supabase, popId, ids),
+    includeStock
+      ? stockOnHandByArticleIds(supabase, popId, ids)
+      : Promise.resolve(new Map<string, number>()),
     costsByArticleIds(supabase, popId, ids),
     listPricesByArticleIds(supabase, popId, ids),
   ])
@@ -326,7 +330,7 @@ async function enrichArticles(
     const costs = costsById.get(row.id) ?? []
     return {
       ...row,
-      stockOnHand: stockById.get(row.id) ?? 0,
+      stockOnHand: includeStock ? (stockById.get(row.id) ?? 0) : 0,
       activeCostCount: costs.filter((cost) => cost.isActive).length,
       costs,
       listPrices: pricesById.get(row.id) ?? [],
@@ -408,6 +412,7 @@ export async function listArticles(
     supabase,
     popId,
     (data ?? []) as Record<string, unknown>[],
+    { includeStock: input.includeStock },
   )
 
   return {

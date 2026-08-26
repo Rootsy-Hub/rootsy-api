@@ -41,6 +41,10 @@ export const listArticlesQuerySchema = z
     sinStock: boolQuery,
     stockNegativo: boolQuery,
     ventaSinStock: boolQuery,
+    includeStock: boolQuery.openapi({
+      description:
+        "true/ausente consulta inventory y rellena stockOnHand. false/0 salta esa consulta, ignora conStock/sinStock/stockNegativo y deja stockOnHand=0. Default true.",
+    }),
     categoryId: z.string().optional().openapi({
       description: "UUID de categoría. Si no es un UUID, se ignora.",
     }),
@@ -65,6 +69,7 @@ export type ListArticlesQuery = {
   sinStock: boolean
   stockNegativo: boolean
   ventaSinStock: boolean
+  includeStock: boolean
   categoryId: string
   itemKinds: ArticleItemKind[]
   sort: string | null
@@ -73,6 +78,10 @@ export type ListArticlesQuery = {
 
 function queryFlagOn(value: string | undefined): boolean {
   return value === "true" || value === "1"
+}
+
+function queryFlagDefaultOn(value: string | undefined): boolean {
+  return value !== "false" && value !== "0"
 }
 
 export function toListArticlesQuery(
@@ -94,6 +103,15 @@ export function toListArticlesQuery(
     ? parsed.pageSize
     : DEFAULT_ARTICLE_TABLE_PAGE_SIZE
 
+  const includeStock = queryFlagDefaultOn(parsed.includeStock)
+  const stockFilters = includeStock
+    ? {
+        conStock: queryFlagOn(parsed.conStock),
+        sinStock: queryFlagOn(parsed.sinStock),
+        stockNegativo: queryFlagOn(parsed.stockNegativo),
+      }
+    : { conStock: false, sinStock: false, stockNegativo: false }
+
   return {
     page: parsed.page,
     pageSize,
@@ -102,10 +120,9 @@ export function toListArticlesQuery(
     soloInactivos: queryFlagOn(parsed.soloInactivos),
     conDescuento: queryFlagOn(parsed.conDescuento),
     sinDescuento: queryFlagOn(parsed.sinDescuento),
-    conStock: queryFlagOn(parsed.conStock),
-    sinStock: queryFlagOn(parsed.sinStock),
-    stockNegativo: queryFlagOn(parsed.stockNegativo),
+    ...stockFilters,
     ventaSinStock: queryFlagOn(parsed.ventaSinStock),
+    includeStock,
     categoryId: /^[0-9a-f-]{36}$/i.test(parsed.categoryId?.trim() ?? "")
       ? parsed.categoryId!.trim()
       : "",
