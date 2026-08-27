@@ -35,4 +35,37 @@ describe("canSubscribeToChannel catalog", () => {
       false,
     )
   })
+
+  it("deja entrar a domain:promotions con sale:read", () => {
+    assert.equal(
+      canSubscribeToChannel("domain:promotions", {
+        userId: "u1",
+        keys: ["sale:read"],
+        isOwner: false,
+      }),
+      true,
+    )
+  })
+
+  it("deja entrar a domain:promotions con promotions:read", () => {
+    assert.equal(
+      canSubscribeToChannel("domain:promotions", {
+        userId: "u1",
+        keys: ["promotions:read"],
+        isOwner: false,
+      }),
+      true,
+    )
+  })
+
+  it("no deja entrar a domain:promotions sin permiso de listado", () => {
+    assert.equal(
+      canSubscribeToChannel("domain:promotions", {
+        userId: "u1",
+        keys: ["chat:read"],
+        isOwner: false,
+      }),
+      false,
+    )
+  })
 })

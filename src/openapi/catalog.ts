@@ -77,6 +77,7 @@ const RESOURCE_TAGS: Record<string, TagDef> = {
   manufacturing: { name: "Producción", description: "Elaboraciones." },
   chat: { name: "Chat", description: "Canales y mensajes del local." },
   sale: { name: "Venta", description: "Catálogo y flujo de venta." },
+  sales: { name: "Ventas", description: "Cobro y persistencia de ventas." },
   "menu-catalog": {
     name: "Catálogo de menú",
     description: "Ítems visibles en menú / venta.",

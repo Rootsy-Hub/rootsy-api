@@ -1,7 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js"
 import { mapSaleCatalogArticleRow, SALE_CATALOG_ARTICLE_SELECT } from "./articleMap.js"
 import { resolveOpenCashSession } from "./cashSession.js"
-import { loadSalePromotions, splitSalePromotions } from "./promotions.js"
 import { loadPriceListOverrideMap } from "./priceList.js"
 import {
   DEFAULT_SALE_SITE_ID,
@@ -77,7 +76,7 @@ export async function loadSaleCatalog(
   | { success: true; data: SaleCatalogData }
   | { success: false; error: string }
 > {
-  const [popNameResult, catResult, allPromotions] = await Promise.all([
+  const [popNameResult, catResult] = await Promise.all([
     supabase.from("pops").select("name").eq("id", popId).maybeSingle(),
     supabase
       .from("categories")
@@ -86,7 +85,6 @@ export async function loadSaleCatalog(
       .eq("show_in_sale", true)
       .order("sort_order", { ascending: true })
       .order("name", { ascending: true }),
-    loadSalePromotions(supabase, popId),
   ])
 
   if (popNameResult.error) {
@@ -101,17 +99,9 @@ export async function loadSaleCatalog(
     name: String(c.name ?? ""),
     sortOrder: Number(c.sort_order ?? 0) || 0,
   }))
-  const { promotions, quantityDeals } = splitSalePromotions(allPromotions)
   const categorySections: SaleCatalogData["categorySections"] = [
     { id: "products", label: "Productos", categories },
   ]
-  if (promotions.length > 0) {
-    categorySections.unshift({
-      id: "promotions",
-      label: "Promociones",
-      categories: [{ id: "all", name: "Promociones", sortOrder: 0 }],
-    })
-  }
 
   return {
     success: true,
@@ -119,8 +109,8 @@ export async function loadSaleCatalog(
       popName: popNameResult.data?.name ? String(popNameResult.data.name) : "",
       categories,
       categorySections,
-      promotions,
-      quantityDeals,
+      promotions: [],
+      quantityDeals: [],
       canReadClients: true,
       canReadPaymentMethods: true,
       canCreateSale: caps.canCreateSale,

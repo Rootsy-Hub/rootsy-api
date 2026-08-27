@@ -4,11 +4,13 @@ import {
   scheduleDaysFromDb,
   scheduleTimeFromDb,
 } from "./schedule.js"
+import { effectiveArticlePrice } from "../sale/articleMap.js"
 import type {
   ListPromotionsQuery,
   PromotionCatalogOption,
   PromotionDetail,
   PromotionListData,
+  PromotionListRow,
   PromotionRow,
   PromotionSlotOptionRow,
   PromotionSlotRow,
@@ -153,19 +155,22 @@ export function mapPromotionRow(
   }
 }
 
-export async function loadPromotionSlots(
+export async function loadPromotionSlotsByIds(
   supabase: SupabaseClient,
   popId: string,
-  promotionId: string,
-): Promise<PromotionSlotRow[]> {
+  promotionIds: string[],
+): Promise<Map<string, PromotionSlotRow[]>> {
+  const slotsByPromo = new Map<string, PromotionSlotRow[]>()
+  if (promotionIds.length === 0) return slotsByPromo
+
   const { data: slotRows } = await supabase
     .from("promotion_slots")
-    .select("id, label, quantity, sort_order")
-    .eq("promotion_id", promotionId)
+    .select("id, promotion_id, label, quantity, sort_order")
     .eq("pop_id", popId)
+    .in("promotion_id", promotionIds)
     .order("sort_order", { ascending: true })
 
-  if (!slotRows?.length) return []
+  if (!slotRows?.length) return slotsByPromo
 
   const slotIds = slotRows.map((r) => String(r.id))
   const { data: optRows } = await supabase
@@ -182,32 +187,44 @@ export async function loadPromotionSlots(
     .filter((r) => r.recipe_id)
     .map((r) => String(r.recipe_id))
 
-  const articleNames = new Map<string, { name: string; salePrice: number }>()
+  const articleMeta = new Map<
+    string,
+    { name: string; salePrice: number; iva: number }
+  >()
   if (articleIds.length > 0) {
     const { data } = await supabase
       .from("articles")
-      .select("id, name, sale_price")
+      .select("id, name, sale_price, iva, discount_mode, discount_value")
       .eq("pop_id", popId)
       .in("id", articleIds)
     for (const r of data ?? []) {
-      articleNames.set(String(r.id), {
+      articleMeta.set(String(r.id), {
         name: String(r.name ?? ""),
-        salePrice: Number(r.sale_price ?? 0) || 0,
+        salePrice: effectiveArticlePrice(
+          Number(r.sale_price ?? 0) || 0,
+          r.discount_mode,
+          r.discount_value,
+        ),
+        iva: Number(r.iva ?? 0) || 0,
       })
     }
   }
 
-  const recipeNames = new Map<string, { name: string; salePrice: number }>()
+  const recipeMeta = new Map<
+    string,
+    { name: string; salePrice: number; iva: number }
+  >()
   if (recipeIds.length > 0) {
     const { data } = await supabase
       .from("recipes")
-      .select("id, name, sale_price")
+      .select("id, name, sale_price, iva")
       .eq("pop_id", popId)
       .in("id", recipeIds)
     for (const r of data ?? []) {
-      recipeNames.set(String(r.id), {
+      recipeMeta.set(String(r.id), {
         name: String(r.name ?? ""),
         salePrice: Number(r.sale_price ?? 0) || 0,
+        iva: Number(r.iva ?? 0) || 0,
       })
     }
   }
@@ -218,35 +235,54 @@ export async function loadPromotionSlots(
     const list = optsBySlot.get(slotId) ?? []
     if (row.article_id) {
       const id = String(row.article_id)
-      const meta = articleNames.get(id)
+      const meta = articleMeta.get(id)
       list.push({
         id: String(row.id),
         kind: "article",
         refId: id,
         name: meta?.name ?? "—",
         salePrice: meta?.salePrice ?? 0,
+        iva: meta?.iva ?? 0,
       })
     } else if (row.recipe_id) {
       const id = String(row.recipe_id)
-      const meta = recipeNames.get(id)
+      const meta = recipeMeta.get(id)
       list.push({
         id: String(row.id),
         kind: "recipe",
         refId: id,
         name: meta?.name ?? "—",
         salePrice: meta?.salePrice ?? 0,
+        iva: meta?.iva ?? 0,
       })
     }
     optsBySlot.set(slotId, list)
   }
 
-  return slotRows.map((slot) => ({
-    id: String(slot.id),
-    label: String(slot.label ?? ""),
-    quantity: Number(slot.quantity ?? 1) || 1,
-    sortOrder: Number(slot.sort_order ?? 0) || 0,
-    options: optsBySlot.get(String(slot.id)) ?? [],
-  }))
+  for (const slot of slotRows) {
+    const promoId = String(slot.promotion_id)
+    const list = slotsByPromo.get(promoId) ?? []
+    list.push({
+      id: String(slot.id),
+      label: String(slot.label ?? ""),
+      quantity: Number(slot.quantity ?? 1) || 1,
+      sortOrder: Number(slot.sort_order ?? 0) || 0,
+      options: optsBySlot.get(String(slot.id)) ?? [],
+    })
+    slotsByPromo.set(promoId, list)
+  }
+  return slotsByPromo
+}
+
+export async function loadPromotionSlots(
+  supabase: SupabaseClient,
+  popId: string,
+  promotionId: string,
+): Promise<PromotionSlotRow[]> {
+  const slotsByPromo = await loadPromotionSlotsByIds(supabase, popId, [
+    promotionId,
+  ])
+  return slotsByPromo.get(promotionId) ?? []
 }
 
 export async function listPromotions(
@@ -311,8 +347,19 @@ export async function listPromotions(
   const promoIds = (data ?? []).map((r) => String(r.id))
   const slotCounts = new Map<string, number>()
   const optionCounts = new Map<string, number>()
+  const slotsByPromo = input.includeSlots
+    ? await loadPromotionSlotsByIds(supabase, popId, promoIds)
+    : null
 
-  if (promoIds.length > 0) {
+  if (slotsByPromo) {
+    for (const [pid, slots] of slotsByPromo) {
+      slotCounts.set(pid, slots.length)
+      optionCounts.set(
+        pid,
+        slots.reduce((n, slot) => n + slot.options.length, 0),
+      )
+    }
+  } else if (promoIds.length > 0) {
     const { data: slots } = await supabase
       .from("promotion_slots")
       .select("id, promotion_id")
@@ -339,16 +386,21 @@ export async function listPromotions(
     }
   }
 
+  const promotions: PromotionListRow[] = (data ?? []).map((row) => {
+    const id = String(row.id)
+    const mapped = mapPromotionRow(
+      row as Record<string, unknown>,
+      slotCounts.get(id) ?? 0,
+      optionCounts.get(id) ?? 0,
+    )
+    if (!input.includeSlots) return mapped
+    return { ...mapped, slots: slotsByPromo?.get(id) ?? [] }
+  })
+
   return {
     success: true,
     data: {
-      promotions: (data ?? []).map((row) =>
-        mapPromotionRow(
-          row as Record<string, unknown>,
-          slotCounts.get(String(row.id)) ?? 0,
-          optionCounts.get(String(row.id)) ?? 0,
-        ),
-      ),
+      promotions,
       totalCount,
       page,
       pageSize: input.pageSize,

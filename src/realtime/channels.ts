@@ -76,8 +76,14 @@ export function canSubscribeToChannel(
   if (channel.startsWith("domain:")) {
     if (session.isOwner) return true
     const domain = channel.slice("domain:".length)
-    if (domain === "articles" || domain === "categories") {
-      return session.keys.some((key) => CATALOG_SUBSCRIBE_KEYS.has(key))
+    if (domain === "articles" || domain === "categories" || domain === "promotions") {
+      if (session.keys.some((key) => CATALOG_SUBSCRIBE_KEYS.has(key))) return true
+      if (domain === "promotions") {
+        return session.keys.some(
+          (key) => key === "promotions:read" || key.startsWith("promotions:"),
+        )
+      }
+      return false
     }
     return session.keys.some((key) => key === `${domain}:read` || key.startsWith(`${domain}:`))
   }

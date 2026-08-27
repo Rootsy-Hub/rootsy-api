@@ -87,6 +87,31 @@ export async function resolvePopInventoryLocationId(
   return { success: true, locationId: String(data.id) }
 }
 
+export async function getPopSellableInventoryLocationId(
+  supabase: SupabaseClient,
+  popId: string,
+): Promise<LocationIdResult> {
+  const { data, error } = await supabase
+    .from("inventory_locations")
+    .select("id")
+    .eq("pop_id", popId)
+    .eq("is_sellable", true)
+    .is("archived_at", null)
+    .order("is_default", { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  if (error) {
+    return {
+      success: false,
+      error: error.message || "No se pudo leer el depósito de venta.",
+    }
+  }
+  if (data?.id) {
+    return { success: true, locationId: String(data.id) }
+  }
+  return ensurePopDefaultInventoryLocationId(supabase, popId)
+}
+
 export async function sumInventoryOnHandForArticle(
   supabase: SupabaseClient,
   popId: string,

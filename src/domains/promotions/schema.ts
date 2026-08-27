@@ -10,7 +10,7 @@ import {
   type PromotionType,
 } from "./types.js"
 
-export const PROMOTION_TABLE_PAGE_SIZES = [10, 25, 50] as const
+export const PROMOTION_TABLE_PAGE_SIZES = [10, 25, 50, 100] as const
 export const DEFAULT_PROMOTION_TABLE_PAGE_SIZE = 25
 export const PROMOTION_TABLE_SORT_KEYS = [
   "name",
@@ -29,6 +29,7 @@ export const listPromotionsQuerySchema = z.object({
   pageSize: z.coerce.number().int().default(DEFAULT_PROMOTION_TABLE_PAGE_SIZE),
   q: z.string().optional().default(""),
   soloActivos: boolQuery,
+  includeSlots: boolQuery,
   promotionType: z.string().optional().default(""),
   sort: z.enum(PROMOTION_TABLE_SORT_KEYS).optional(),
   ord: z.enum(["asc", "desc"]).optional(),
@@ -39,6 +40,7 @@ export type ListPromotionsQuery = {
   pageSize: number
   search: string
   soloActivos: boolean
+  includeSlots: boolean
   promotionType: PromotionType | ""
   sort: string | null
   ord: "asc" | "desc"
@@ -62,6 +64,7 @@ export function toListPromotionsQuery(
     pageSize,
     search: parsed.q.trim(),
     soloActivos: parsed.soloActivos === true,
+    includeSlots: parsed.includeSlots === true,
     promotionType,
     sort: parsed.sort ?? null,
     ord: parsed.ord ?? "asc",
@@ -125,6 +128,7 @@ export type PromotionSlotOptionRow = {
   refId: string
   name: string
   salePrice: number
+  iva: number
 }
 
 export type PromotionSlotRow = {
@@ -168,8 +172,12 @@ export type PromotionDetail = PromotionRow & {
   slots: PromotionSlotRow[]
 }
 
+export type PromotionListRow = PromotionRow & {
+  slots?: PromotionSlotRow[]
+}
+
 export type PromotionListData = {
-  promotions: PromotionRow[]
+  promotions: PromotionListRow[]
   totalCount: number
   page: number
   pageSize: number

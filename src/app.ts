@@ -36,6 +36,7 @@ import { hrRoutes } from "./domains/hr/routes.js"
 import { manufacturingRoutes } from "./domains/manufacturing/routes.js"
 import { chatRoutes } from "./domains/chat/routes.js"
 import { saleRoutes } from "./domains/sale/routes.js"
+import { salesRoutes } from "./domains/sales/routes.js"
 import { menuCatalogRoutes } from "./domains/menu-catalog/routes.js"
 import { mostradorRoutes } from "./domains/mostrador/routes.js"
 import { mesasRoutes } from "./domains/mesas/routes.js"
@@ -129,6 +130,7 @@ export function createApp() {
   pop.route("/manufacturing", manufacturingRoutes)
   pop.route("/chat", chatRoutes)
   pop.route("/sale", saleRoutes)
+  pop.route("/sales", salesRoutes)
   pop.route("/menu-catalog", menuCatalogRoutes)
   pop.route("/mostrador", mostradorRoutes)
   pop.route("/mesas", mesasRoutes)
