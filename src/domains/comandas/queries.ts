@@ -96,6 +96,22 @@ export async function listStationTickets(
   }
 }
 
+export async function listTicketsByCartLineIds(
+  supabase: SupabaseClient,
+  popId: string,
+  cartLineIds: string[],
+): Promise<ComandaTicket[]> {
+  const ids = [...new Set(cartLineIds.map((id) => id.trim()).filter(Boolean))]
+  if (ids.length === 0) return []
+  const { data, error } = await supabase
+    .from("comandas")
+    .select(COMANDA_SELECT)
+    .eq("pop_id", popId)
+    .in("cart_line_id", ids)
+  if (error || !data) return []
+  return data.map((row) => mapComandaRow(row as ComandaDbRow))
+}
+
 export async function getComandaTicket(
   supabase: SupabaseClient,
   popId: string,

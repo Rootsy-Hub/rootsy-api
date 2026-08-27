@@ -23,6 +23,10 @@ import {
   listRecipeCategoriesQuerySchema,
   updateRecipeCategoryBodySchema,
 } from "./schema.js"
+import {
+  recipeCategoryRealtimeSnapshot,
+  publishRecipeCategoryEventBestEffort,
+} from "./realtime.js"
 
 const idSchema = z.string().uuid()
 
@@ -73,6 +77,13 @@ recipeCategoryRoutes.patch(
       c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
+    await publishRecipeCategoryEventBestEffort(c, {
+      type: "recipecategories.layout",
+      categoryId: body.data.updates[0]?.id ?? "layout",
+      payload: {
+        categoryIds: body.data.updates.map((row) => row.id),
+      },
+    })
     return c.json(result)
   },
 )
@@ -100,6 +111,11 @@ recipeCategoryRoutes.post(
       c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status ?? 500)
+    await publishRecipeCategoryEventBestEffort(c, {
+      type: "recipecategories.created",
+      categoryId: result.data.id,
+      payload: { category: recipeCategoryRealtimeSnapshot(result.data) },
+    })
     return c.json(result, 201)
   },
 )
@@ -150,6 +166,11 @@ recipeCategoryRoutes.patch(
       c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
+    await publishRecipeCategoryEventBestEffort(c, {
+      type: "recipecategories.updated",
+      categoryId: id.data,
+      payload: { category: recipeCategoryRealtimeSnapshot(result.data) },
+    })
     return c.json(result)
   },
 )
@@ -169,6 +190,11 @@ recipeCategoryRoutes.delete(
       c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
+    await publishRecipeCategoryEventBestEffort(c, {
+      type: "recipecategories.deleted",
+      categoryId: id.data,
+      payload: { categoryId: id.data },
+    })
     return c.json(result)
   },
 )

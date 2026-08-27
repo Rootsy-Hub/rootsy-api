@@ -13,7 +13,13 @@ import {
   listActiveStations,
   listPendingForSource,
   listStationTickets,
+  listTicketsByCartLineIds,
 } from "./queries.js"
+import {
+  publishComandasEventBestEffort,
+  ticketRealtimeSnapshot,
+  ticketsPayload,
+} from "./realtime.js"
 import {
   comandaStatusRoute,
   getComandaTicketRoute,
@@ -55,24 +61,58 @@ comandasRoutes.openapi(pendingComandasRoute, async (c) => {
 })
 
 comandasRoutes.openapi(sendComandaRoute, async (c) => {
+  const body = routeInput<z.infer<typeof sendBodySchema>>(c, "json")
   const result = await sendComandaBatch(
     c.get("supabase"),
     c.get("sidecar").popId,
-    routeInput<z.infer<typeof sendBodySchema>>(c, "json"),
+    body,
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  const sentTickets = await listTicketsByCartLineIds(
+    c.get("supabase"),
+    c.get("sidecar").popId,
+    result.sentCartLineIds,
+  )
+  await publishComandasEventBestEffort(c, {
+    type: "comandas.sent",
+    resourceId: body.sourceId,
+    payload: {
+      sourceKind: body.sourceKind,
+      sourceId: body.sourceId,
+      sentCartLineIds: result.sentCartLineIds,
+      peels: result.peels,
+      tickets: ticketsPayload(sentTickets),
+    },
+  })
   return c.json(result, 201)
 })
 
 comandasRoutes.openapi(voidComandaRoute, async (c) => {
+  const body = routeInput<z.infer<typeof voidBodySchema>>(c, "json")
   const result = await voidComandaBatch(
     c.get("supabase"),
     c.get("sidecar").popId,
-    routeInput<z.infer<typeof voidBodySchema>>(c, "json"),
+    body,
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  const voidedTickets = await listTicketsByCartLineIds(
+    c.get("supabase"),
+    c.get("sidecar").popId,
+    [...result.voidedCartLineIds, ...result.peels.map((peel) => peel.voidedCartLineId)],
+  )
+  await publishComandasEventBestEffort(c, {
+    type: "comandas.voided",
+    resourceId: body.sourceId,
+    payload: {
+      sourceKind: body.sourceKind,
+      sourceId: body.sourceId,
+      voidedCartLineIds: result.voidedCartLineIds,
+      peels: result.peels,
+      tickets: ticketsPayload(voidedTickets),
+    },
+  })
   return c.json(result, 201)
 })
 
@@ -106,5 +146,17 @@ comandasRoutes.openapi(comandaStatusRoute, async (c) => {
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  await publishComandasEventBestEffort(c, {
+    type: "comandas.status_changed",
+    resourceId: result.ticket.id,
+    payload: {
+      ticketId: result.ticket.id,
+      status: result.ticket.status,
+      sourceKind: result.ticket.sourceKind,
+      sourceId: result.ticket.sourceId,
+      cartLineId: result.ticket.cartLineId,
+      ticket: ticketRealtimeSnapshot(result.ticket),
+    },
+  })
   return c.json(result, 200)
 })

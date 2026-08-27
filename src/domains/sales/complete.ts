@@ -38,7 +38,13 @@ import {
 import { buildSaleStockOps, collectStockDeductionNeeds } from "./stock.js"
 
 type MutateResult =
-  | { success: true; saleId: string; replayed?: boolean }
+  | {
+      success: true
+      saleId: string
+      replayed?: boolean
+      closedTableSessionId?: string
+      linkedCounterOrderId?: string
+    }
   | { success: false; error: string; status: 400 | 404 | 409 | 500 }
 
 type BuiltLine = {
@@ -1018,5 +1024,12 @@ export async function completeSale(
     }
     return { success: false, error: applied.error, status: applied.status }
   }
-  return { success: true, saleId }
+  return {
+    success: true,
+    saleId,
+    closedTableSessionId:
+      tableSessionId && shouldCloseTable ? tableSessionId : undefined,
+    linkedCounterOrderId:
+      counterOrderId && shouldLinkCounter ? counterOrderId : undefined,
+  }
 }

@@ -6,6 +6,7 @@ import { requireMutationPermission } from "../../sidecar/mutationPermission.js"
 import {
   RECIPE_CREATE,
   RECIPE_DELETE,
+  RECIPE_LIST_READ,
   RECIPE_READ,
   RECIPE_UPDATE,
 } from "./allowlist.js"
@@ -17,6 +18,10 @@ import {
   listRecipes,
   searchRecipeIngredients,
 } from "./queries.js"
+import {
+  recipeRealtimeSnapshot,
+  publishRecipeEventBestEffort,
+} from "./realtime.js"
 import { parsePatchBody } from "../../lib/patchBody.js"
 import {
   deleteRecipeBodySchema,
@@ -40,7 +45,7 @@ function recipeCaps(sidecar: { keys: string[]; isOwner: boolean }) {
 
 export const recipeRoutes = new Hono<SidecarEnv>()
 
-recipeRoutes.get("/", requireAnyPermission(RECIPE_READ), async (c) => {
+recipeRoutes.get("/", requireAnyPermission(RECIPE_LIST_READ), async (c) => {
   const parsed = listRecipesQuerySchema.safeParse({
     page: c.req.query("page") || undefined,
     pageSize: c.req.query("pageSize") || undefined,
@@ -72,13 +77,24 @@ recipeRoutes.post("/", requireMutationPermission(RECIPE_CREATE), async (c) => {
       400,
     )
   }
+  const sidecar = c.get("sidecar")
   const result = await createRecipe(
     c.get("supabase"),
-    c.get("sidecar").popId,
+    sidecar.popId,
     body.data,
     c.get("mutationAudit"),
   )
   if (!result.success) return c.json(result, result.status)
+  if (result.id) {
+    const row = await getRecipe(c.get("supabase"), sidecar.popId, result.id)
+    if (row.success) {
+      await publishRecipeEventBestEffort(c, {
+        type: "recipes.created",
+        recipeId: result.id,
+        payload: { recipe: recipeRealtimeSnapshot(row.data) },
+      })
+    }
+  }
   return c.json(result, 201)
 })
 
@@ -170,14 +186,23 @@ recipeRoutes.patch(
     if (!body.success) {
       return c.json({ success: false, error: body.error }, 400)
     }
+    const sidecar = c.get("sidecar")
     const result = await updateRecipe(
       c.get("supabase"),
-      c.get("sidecar").popId,
+      sidecar.popId,
       id.data,
       body.data,
       c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
+    const row = await getRecipe(c.get("supabase"), sidecar.popId, id.data)
+    if (row.success) {
+      await publishRecipeEventBestEffort(c, {
+        type: "recipes.updated",
+        recipeId: id.data,
+        payload: { recipe: recipeRealtimeSnapshot(row.data) },
+      })
+    }
     return c.json(result)
   },
 )
@@ -207,6 +232,11 @@ recipeRoutes.delete(
       c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
+    await publishRecipeEventBestEffort(c, {
+      type: "recipes.deleted",
+      recipeId: id.data,
+      payload: { recipeId: id.data },
+    })
     return c.json(result)
   },
 )

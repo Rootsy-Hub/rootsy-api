@@ -1,8 +1,15 @@
+import type { Context } from "hono"
 import type { SidecarEnv } from "../../sidecar/pop.js"
 import { createOpenApiApp } from "../../openapi/app.js"
 import { apiFail } from "../../openapi/respond.js"
 import { routeInput, routeParam } from "../../openapi/valid.js"
 import { parsePatchBody } from "../../lib/patchBody.js"
+import {
+  checkoutSavedPayload,
+  publishMesasEventBestEffort,
+  reservationRealtimeSnapshot,
+  sessionRealtimeSnapshot,
+} from "./realtime.js"
 import {
   createDecor,
   createSalon,
@@ -91,6 +98,14 @@ import {
 
 export const mesasRoutes = createOpenApiApp<SidecarEnv>()
 
+async function publishLayoutChanged(c: Context<SidecarEnv>) {
+  await publishMesasEventBestEffort(c, {
+    type: "mesas.layout_changed",
+    resourceId: c.get("sidecar").popId,
+    payload: {},
+  })
+}
+
 mesasRoutes.openapi(mesasLayoutRoute, async (c) => {
   const result = await getMesasLayout(c.get("supabase"), c.get("sidecar").popId)
   if (!result.success) return apiFail(c, result.error, 500)
@@ -105,6 +120,7 @@ mesasRoutes.openapi(mesasLayoutPositionsRoute, async (c) => {
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  await publishLayoutChanged(c)
   return c.json(result, 200)
 })
 
@@ -124,6 +140,7 @@ mesasRoutes.openapi(reorderSalonsRoute, async (c) => {
     "mesas.salons.reorder",
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  await publishLayoutChanged(c)
   return c.json(result, 200)
 })
 
@@ -135,6 +152,7 @@ mesasRoutes.openapi(createSalonRoute, async (c) => {
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  await publishLayoutChanged(c)
   return c.json(result, 201)
 })
 
@@ -152,6 +170,7 @@ mesasRoutes.openapi(patchSalonRoute, async (c) => {
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  await publishLayoutChanged(c)
   return c.json(result, 200)
 })
 
@@ -163,6 +182,7 @@ mesasRoutes.openapi(deleteSalonRoute, async (c) => {
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  await publishLayoutChanged(c)
   return c.json(result, 200)
 })
 
@@ -176,6 +196,7 @@ mesasRoutes.openapi(reorderTablesRoute, async (c) => {
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  await publishLayoutChanged(c)
   return c.json(result, 200)
 })
 
@@ -187,6 +208,7 @@ mesasRoutes.openapi(createTableRoute, async (c) => {
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  await publishLayoutChanged(c)
   return c.json(result, 201)
 })
 
@@ -204,6 +226,7 @@ mesasRoutes.openapi(patchTableRoute, async (c) => {
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  await publishLayoutChanged(c)
   return c.json(result, 200)
 })
 
@@ -215,6 +238,7 @@ mesasRoutes.openapi(deleteTableRoute, async (c) => {
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  await publishLayoutChanged(c)
   return c.json(result, 200)
 })
 
@@ -228,6 +252,7 @@ mesasRoutes.openapi(reorderDecorsRoute, async (c) => {
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  await publishLayoutChanged(c)
   return c.json(result, 200)
 })
 
@@ -239,6 +264,7 @@ mesasRoutes.openapi(createDecorRoute, async (c) => {
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  await publishLayoutChanged(c)
   return c.json(result, 201)
 })
 
@@ -256,6 +282,7 @@ mesasRoutes.openapi(patchDecorRoute, async (c) => {
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  await publishLayoutChanged(c)
   return c.json(result, 200)
 })
 
@@ -267,6 +294,7 @@ mesasRoutes.openapi(deleteDecorRoute, async (c) => {
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  await publishLayoutChanged(c)
   return c.json(result, 200)
 })
 
@@ -285,6 +313,12 @@ mesasRoutes.openapi(openSessionRoute, async (c) => {
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  await publishMesasEventBestEffort(c, {
+    type: "mesas.session_opened",
+    resourceId: result.session.id,
+    resourceType: "session",
+    payload: { session: sessionRealtimeSnapshot(result.session) },
+  })
   return c.json(result, 201)
 })
 
@@ -307,6 +341,12 @@ mesasRoutes.openapi(patchSessionRoute, async (c) => {
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  await publishMesasEventBestEffort(c, {
+    type: "mesas.session_updated",
+    resourceId: result.session.id,
+    resourceType: "session",
+    payload: { session: sessionRealtimeSnapshot(result.session) },
+  })
   return c.json(result, 200)
 })
 
@@ -320,6 +360,12 @@ mesasRoutes.openapi(closeSessionRoute, async (c) => {
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  await publishMesasEventBestEffort(c, {
+    type: "mesas.session_closed",
+    resourceId: routeParam(c, "sessionId"),
+    resourceType: "session",
+    payload: { sessionId: routeParam(c, "sessionId") },
+  })
   return c.json(result, 200)
 })
 
@@ -333,18 +379,33 @@ mesasRoutes.openapi(closeSessionCheckoutRoute, async (c) => {
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  await publishMesasEventBestEffort(c, {
+    type: "mesas.session_closed",
+    resourceId: routeParam(c, "sessionId"),
+    resourceType: "session",
+    payload: { sessionId: routeParam(c, "sessionId") },
+  })
   return c.json(result, 200)
 })
 
 mesasRoutes.openapi(sessionCheckoutRoute, async (c) => {
+  const checkout = routeInput<z.infer<typeof sessionCheckoutBodySchema>>(c, "json")
+    .checkout
+  const sessionId = routeParam(c, "sessionId")
   const result = await saveSessionCheckout(
     c.get("supabase"),
     c.get("sidecar").popId,
-    routeParam(c, "sessionId"),
-    routeInput<z.infer<typeof sessionCheckoutBodySchema>>(c, "json").checkout,
+    sessionId,
+    checkout,
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  await publishMesasEventBestEffort(c, {
+    type: "mesas.checkout_saved",
+    resourceId: sessionId,
+    resourceType: "session",
+    payload: checkoutSavedPayload(sessionId, result.updatedAt, checkout),
+  })
   return c.json(result, 200)
 })
 
@@ -358,6 +419,16 @@ mesasRoutes.openapi(sessionFloorStatusRoute, async (c) => {
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  await publishMesasEventBestEffort(c, {
+    type: "mesas.floor_status_changed",
+    resourceId: routeParam(c, "sessionId"),
+    resourceType: "session",
+    payload: {
+      sessionId: routeParam(c, "sessionId"),
+      floorStatus: result.floorStatus,
+      updatedAt: result.updatedAt,
+    },
+  })
   return c.json(result, 200)
 })
 
@@ -378,6 +449,11 @@ mesasRoutes.openapi(patchReservationSettingsRoute, async (c) => {
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  await publishMesasEventBestEffort(c, {
+    type: "mesas.settings_updated",
+    resourceId: c.get("sidecar").popId,
+    payload: {},
+  })
   return c.json(result, 200)
 })
 
@@ -399,6 +475,12 @@ mesasRoutes.openapi(createReservationRoute, async (c) => {
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  await publishMesasEventBestEffort(c, {
+    type: "mesas.reservation_upserted",
+    resourceId: result.reservation.id,
+    resourceType: "reservation",
+    payload: { reservation: reservationRealtimeSnapshot(result.reservation) },
+  })
   return c.json(result, 201)
 })
 
@@ -411,6 +493,12 @@ mesasRoutes.openapi(patchReservationRoute, async (c) => {
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  await publishMesasEventBestEffort(c, {
+    type: "mesas.reservation_upserted",
+    resourceId: result.reservation.id,
+    resourceType: "reservation",
+    payload: { reservation: reservationRealtimeSnapshot(result.reservation) },
+  })
   return c.json(result, 200)
 })
 
@@ -422,6 +510,12 @@ mesasRoutes.openapi(cancelReservationRoute, async (c) => {
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  await publishMesasEventBestEffort(c, {
+    type: "mesas.reservation_cancelled",
+    resourceId: routeParam(c, "reservationId"),
+    resourceType: "reservation",
+    payload: { reservationId: routeParam(c, "reservationId") },
+  })
   return c.json(result, 200)
 })
 
@@ -434,5 +528,11 @@ mesasRoutes.openapi(reservationStatusRoute, async (c) => {
     c.get("mutationAudit"),
   )
   if (!result.success) return apiFail(c, result.error, result.status)
+  await publishMesasEventBestEffort(c, {
+    type: "mesas.reservation_status_changed",
+    resourceId: result.reservation.id,
+    resourceType: "reservation",
+    payload: { reservation: reservationRealtimeSnapshot(result.reservation) },
+  })
   return c.json(result, 200)
 })
