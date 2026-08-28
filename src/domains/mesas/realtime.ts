@@ -69,6 +69,7 @@ export async function publishMesasEvent(
     resourceId: string
     resourceType?: string
     payload?: Record<string, unknown>
+    channels?: string[]
   },
 ): Promise<void> {
   const sidecar = c.get("sidecar")
@@ -84,6 +85,7 @@ export async function publishMesasEvent(
     },
     payload: input.payload ?? { id: input.resourceId },
     require: { permissions: [...MESAS_REALTIME_READ] },
+    ...(input.channels ? { channels: input.channels } : {}),
   })
 }
 

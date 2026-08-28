@@ -12,6 +12,10 @@ import {
 } from "./allowlist.js"
 import { closeCashSession } from "./close.js"
 import {
+  cajasSessionOpenedPayload,
+  publishCajasEventBestEffort,
+} from "./realtime.js"
+import {
   addCashMovement,
   createCashRegister,
   deleteCashRegister,
@@ -206,7 +210,15 @@ cashRegisterRoutes.post(
       c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
-    return c.json(result)
+    const openedByUserId = result.openedByUserId ?? c.get("userId")
+    if (openedByUserId) {
+      await publishCajasEventBestEffort(c, {
+        type: "cajas.session_closed",
+        userId: openedByUserId,
+        payload: { sessionId: sessionId.data },
+      })
+    }
+    return c.json({ success: true })
   },
 )
 
@@ -276,7 +288,24 @@ cashRegisterRoutes.post(
       c.get("mutationAudit"),
     )
     if (!result.success) return c.json(result, result.status)
-    return c.json(result)
+    const openerUserId = c.get("userId")
+    const operate = await getOperateOpenCashSession(
+      c.get("supabase"),
+      c.get("sidecar").popId,
+      openerUserId,
+    )
+    await publishCajasEventBestEffort(c, {
+      type: "cajas.session_opened",
+      userId: openerUserId,
+      payload:
+        operate.success && operate.data.session
+          ? cajasSessionOpenedPayload(operate.data.session)
+          : {
+              sessionId: result.sessionId,
+              cashRegisterId: registerId.data,
+            },
+    })
+    return c.json({ success: true })
   },
 )
 

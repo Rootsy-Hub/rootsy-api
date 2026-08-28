@@ -25,6 +25,18 @@ export function domainFromEventType(type: string): string | null {
   return DOMAIN_RE.test(domain) ? domain : null
 }
 
+export function sessionResourceChannel(sessionId: string): string {
+  return `resource:session:${sessionId}`
+}
+
+export function orderResourceChannel(orderId: string): string {
+  return `resource:order:${orderId}`
+}
+
+export function cajasUserChannel(userId: string): string {
+  return `resource:cajas:${userId}`
+}
+
 export function parseChannel(raw: string): string | null {
   const channel = raw.trim()
   if (channel === "presence") return channel
@@ -108,6 +120,10 @@ export function canSubscribeToChannel(
       )
     }
     return session.keys.some((key) => key === `${domain}:read` || key.startsWith(`${domain}:`))
+  }
+
+  if (channel.startsWith("resource:cajas:")) {
+    return sameUserId(channel.slice("resource:cajas:".length), session.userId)
   }
 
   if (channel.startsWith("resource:")) return true

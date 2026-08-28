@@ -24,7 +24,7 @@ import type { CloseSessionBody } from "./schema.js"
 import { computeEfectivoTeoricoSession } from "./sessionCash.js"
 
 type CloseResult =
-  | { success: true }
+  | { success: true; openedByUserId: string | null }
   | { success: false; error: string; status: 400 | 403 | 404 | 409 | 500 }
 
 export async function closeCashSession(
@@ -218,5 +218,5 @@ export async function closeCashSession(
   if (!applied.success) {
     return { success: false, error: applied.error, status: applied.status }
   }
-  return { success: true }
+  return { success: true, openedByUserId }
 }

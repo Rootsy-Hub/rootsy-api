@@ -4,6 +4,7 @@ import { createOpenApiApp } from "../../openapi/app.js"
 import { apiFail } from "../../openapi/respond.js"
 import { routeInput, routeParam } from "../../openapi/valid.js"
 import { parsePatchBody } from "../../lib/patchBody.js"
+import { sessionResourceChannel } from "../../realtime/channels.js"
 import {
   checkoutSavedPayload,
   publishMesasEventBestEffort,
@@ -404,6 +405,7 @@ mesasRoutes.openapi(sessionCheckoutRoute, async (c) => {
     type: "mesas.checkout_saved",
     resourceId: sessionId,
     resourceType: "session",
+    channels: [sessionResourceChannel(sessionId)],
     payload: checkoutSavedPayload(sessionId, result.updatedAt, checkout),
   })
   return c.json(result, 200)

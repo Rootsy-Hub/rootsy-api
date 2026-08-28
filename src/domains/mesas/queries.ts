@@ -150,7 +150,9 @@ export async function listOpenSessions(
   return {
     success: true,
     sessions: (data ?? []).map((row) =>
-      mapSession(row as unknown as Parameters<typeof mapSession>[0]),
+      mapSession(row as unknown as Parameters<typeof mapSession>[0], {
+        includeCheckout: false,
+      }),
     ),
   }
 }

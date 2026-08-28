@@ -53,6 +53,7 @@ export async function publishMostradorEvent(
     type: MostradorEventType
     resourceId: string
     payload?: Record<string, unknown>
+    channels?: string[]
   },
 ): Promise<void> {
   const sidecar = c.get("sidecar")
@@ -65,6 +66,7 @@ export async function publishMostradorEvent(
     resource: { type: "order", id: input.resourceId },
     payload: input.payload ?? { orderId: input.resourceId },
     require: { permissions: [...MOSTRADOR_REALTIME_READ] },
+    ...(input.channels ? { channels: input.channels } : {}),
   })
 }
 

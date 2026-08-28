@@ -17,24 +17,27 @@ export function checkoutFromMetadata(
   return isRecord(metadata.checkout) ? metadata.checkout : null
 }
 
-export function mapCounterOrderRow(row: {
-  id: string
-  order_day: string
-  order_number: number
-  status: string
-  fulfillment_type: string
-  delivery_address: string | null
-  phone: string | null
-  driver_name: string | null
-  estimated_minutes: number
-  notes: string | null
-  immediate_fulfillment: boolean | null
-  sale_id: string | null
-  opened_at: string
-  updated_at: string
-  delivered_at: string | null
-  metadata: unknown
-}): CounterOrder {
+export function mapCounterOrderRow(
+  row: {
+    id: string
+    order_day: string
+    order_number: number
+    status: string
+    fulfillment_type: string
+    delivery_address: string | null
+    phone: string | null
+    driver_name: string | null
+    estimated_minutes: number
+    notes: string | null
+    immediate_fulfillment: boolean | null
+    sale_id: string | null
+    opened_at: string
+    updated_at: string
+    delivered_at: string | null
+    metadata: unknown
+  },
+  options?: { includeCheckout?: boolean },
+): CounterOrder {
   return {
     id: row.id,
     orderDay: row.order_day,
@@ -51,7 +54,10 @@ export function mapCounterOrderRow(row: {
     openedAt: row.opened_at,
     updatedAt: row.updated_at,
     deliveredAt: row.delivered_at,
-    checkout: checkoutFromMetadata(row.metadata),
+    checkout:
+      options?.includeCheckout === false
+        ? null
+        : checkoutFromMetadata(row.metadata),
   }
 }
 
@@ -81,7 +87,9 @@ export async function listCounterOrders(
     success: true,
     data: {
       orders: (data ?? []).map((row) =>
-        mapCounterOrderRow(row as Parameters<typeof mapCounterOrderRow>[0]),
+        mapCounterOrderRow(row as Parameters<typeof mapCounterOrderRow>[0], {
+          includeCheckout: false,
+        }),
       ),
     },
   }

@@ -102,6 +102,7 @@ export const sessionBodySchema = z
     guestCount: z.number().nullable().optional(),
     note: z.string().optional(),
     reservationId: z.string().uuid().nullable().optional(),
+    checkout: z.record(z.string(), z.unknown()).optional(),
   })
   .openapi("SessionBody")
 

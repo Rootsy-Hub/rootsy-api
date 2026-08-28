@@ -18,7 +18,7 @@ import type {
 import { computeCashBalance } from "./sessionCash.js"
 
 type MutateResult =
-  | { success: true; registerId?: string }
+  | { success: true; registerId?: string; sessionId?: string }
   | { success: false; error: string; status: 400 | 404 | 409 | 500 }
 
 async function resolveArcaSalePointId(
@@ -303,7 +303,7 @@ export async function openCashSession(
   if (!applied.success) {
     return { success: false, error: applied.error, status: applied.status }
   }
-  return { success: true }
+  return { success: true, sessionId: id }
 }
 
 export async function addCashMovement(

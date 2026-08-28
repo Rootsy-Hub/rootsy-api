@@ -16,6 +16,7 @@ import {
   listTicketsByCartLineIds,
 } from "./queries.js"
 import {
+  comandasEventChannels,
   publishComandasEventBestEffort,
   ticketRealtimeSnapshot,
   ticketsPayload,
@@ -77,6 +78,7 @@ comandasRoutes.openapi(sendComandaRoute, async (c) => {
   await publishComandasEventBestEffort(c, {
     type: "comandas.sent",
     resourceId: body.sourceId,
+    channels: comandasEventChannels(body.sourceKind, body.sourceId),
     payload: {
       sourceKind: body.sourceKind,
       sourceId: body.sourceId,
@@ -105,6 +107,7 @@ comandasRoutes.openapi(voidComandaRoute, async (c) => {
   await publishComandasEventBestEffort(c, {
     type: "comandas.voided",
     resourceId: body.sourceId,
+    channels: comandasEventChannels(body.sourceKind, body.sourceId),
     payload: {
       sourceKind: body.sourceKind,
       sourceId: body.sourceId,
@@ -149,6 +152,10 @@ comandasRoutes.openapi(comandaStatusRoute, async (c) => {
   await publishComandasEventBestEffort(c, {
     type: "comandas.status_changed",
     resourceId: result.ticket.id,
+    channels: comandasEventChannels(
+      result.ticket.sourceKind,
+      result.ticket.sourceId,
+    ),
     payload: {
       ticketId: result.ticket.id,
       status: result.ticket.status,

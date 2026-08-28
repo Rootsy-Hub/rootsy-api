@@ -175,17 +175,20 @@ function floorStatusFromMetadata(metadata: unknown): FloorStatus {
   return metadata.floor_status === "paying" ? "paying" : "open"
 }
 
-export function mapSession(row: {
-  id: string
-  dining_table_id: string
-  waiter_user_id: string | null
-  guest_count: number | null
-  notes: string | null
-  opened_at: string
-  updated_at: string
-  metadata: unknown
-  table_session_tables: { dining_table_id: string }[] | null
-}): MesaSession {
+export function mapSession(
+  row: {
+    id: string
+    dining_table_id: string
+    waiter_user_id: string | null
+    guest_count: number | null
+    notes: string | null
+    opened_at: string
+    updated_at: string
+    metadata: unknown
+    table_session_tables: { dining_table_id: string }[] | null
+  },
+  options?: { includeCheckout?: boolean },
+): MesaSession {
   const extraIds = (row.table_session_tables ?? []).map((t) => t.dining_table_id)
   return {
     id: row.id,
@@ -195,7 +198,10 @@ export function mapSession(row: {
     note: row.notes?.trim() ?? "",
     openedAt: row.opened_at,
     updatedAt: row.updated_at,
-    checkout: checkoutFromMetadata(row.metadata),
+    checkout:
+      options?.includeCheckout === false
+        ? null
+        : checkoutFromMetadata(row.metadata),
     floorStatus: floorStatusFromMetadata(row.metadata),
   }
 }

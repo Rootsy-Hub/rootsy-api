@@ -1,7 +1,21 @@
 import type { Context } from "hono"
 import { publishDomainEvent } from "../../realtime/bus.js"
+import {
+  orderResourceChannel,
+  sessionResourceChannel,
+} from "../../realtime/channels.js"
 import type { SidecarEnv } from "../../sidecar/pop.js"
 import type { ComandaTicket } from "./schema.js"
+
+export function comandasEventChannels(
+  sourceKind: string,
+  sourceId: string,
+): string[] {
+  const channels = ["domain:comandas"]
+  if (sourceKind === "table") channels.push(sessionResourceChannel(sourceId))
+  if (sourceKind === "counter") channels.push(orderResourceChannel(sourceId))
+  return channels
+}
 
 const TICKETS_PAYLOAD_BUDGET = 6_000
 
@@ -61,6 +75,7 @@ export async function publishComandasEvent(
     type: ComandasEventType
     resourceId: string
     payload?: Record<string, unknown>
+    channels?: string[]
   },
 ): Promise<void> {
   const sidecar = c.get("sidecar")
@@ -73,6 +88,7 @@ export async function publishComandasEvent(
     resource: { type: "comanda", id: input.resourceId },
     payload: input.payload ?? { id: input.resourceId },
     require: { permissions: [...COMANDAS_REALTIME_READ] },
+    ...(input.channels ? { channels: input.channels } : {}),
   })
 }
 

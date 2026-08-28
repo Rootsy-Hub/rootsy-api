@@ -24,7 +24,8 @@ export const listCounterOrdersRoute = documentedRoute({
   path: "/orders",
   tags,
   summary: "Listar pedidos de mostrador",
-  description: "Permiso `mostrador:read`.",
+  description:
+    "Tablero: pedidos sin ticket. El checkout va en GET /orders/{orderId}. Permiso `mostrador:read`.",
   middleware: read,
 })
 

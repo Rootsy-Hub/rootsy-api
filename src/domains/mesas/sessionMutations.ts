@@ -191,8 +191,11 @@ export async function openSession(
     waiter_user_id: parsed.waiterId || null,
     opened_by: userId,
   }
-  if (parsed.reservationId) {
-    row.metadata = { reservation_id: parsed.reservationId }
+  if (parsed.reservationId || isRecord(input.checkout)) {
+    row.metadata = {
+      ...(parsed.reservationId ? { reservation_id: parsed.reservationId } : {}),
+      ...(isRecord(input.checkout) ? { checkout: input.checkout } : {}),
+    }
   }
 
   const applied = await auditedInsert(supabase, {
@@ -464,11 +467,12 @@ export async function saveSessionCheckout(
     ? { ...existing.metadata }
     : {}
   metadata.checkout = checkout
+  const updatedAt = new Date().toISOString()
   const applied = await auditedUpdate(supabase, {
     kind: "mesas.session.checkout",
     table: "table_sessions",
     id: sessionId,
-    row: { metadata },
+    row: { metadata, updated_at: updatedAt },
     ctx: audit,
     popId,
     previous: existing,

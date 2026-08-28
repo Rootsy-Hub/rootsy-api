@@ -166,6 +166,8 @@ export const listSessionsRoute = documentedRoute({
   path: "/sessions",
   tags,
   summary: "Sesiones abiertas",
+  description:
+    "Piso: ocupación sin ticket. El checkout va en GET /sessions/{sessionId}.",
   middleware: read,
 })
 

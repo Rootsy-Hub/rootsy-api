@@ -89,6 +89,7 @@ export async function createCounterOrder(
     immediate_fulfillment: immediate,
     delivered_at: immediate ? now : null,
     opened_by: userId,
+    ...(isRecord(input.checkout) ? { metadata: { checkout: input.checkout } } : {}),
   }
 
   const applied = await auditedInsert(supabase, {
@@ -403,11 +404,12 @@ export async function saveCounterOrderCheckout(
       ? { ...existing.metadata }
       : {}
   metadata.checkout = checkout
+  const updatedAt = new Date().toISOString()
   const applied = await auditedUpdate(supabase, {
     kind: "mostrador.update",
     table: "counter_orders",
     id: orderId,
-    row: { metadata },
+    row: { metadata, updated_at: updatedAt },
     ctx: audit,
     popId,
     previous: existing,

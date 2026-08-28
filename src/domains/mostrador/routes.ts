@@ -3,6 +3,7 @@ import { createOpenApiApp } from "../../openapi/app.js"
 import { apiFail } from "../../openapi/respond.js"
 import { routeInput, routeParam } from "../../openapi/valid.js"
 import { parsePatchBody } from "../../lib/patchBody.js"
+import { orderResourceChannel } from "../../realtime/channels.js"
 import {
   checkoutSavedPayload,
   orderRealtimeSnapshot,
@@ -152,6 +153,7 @@ mostradorRoutes.openapi(counterOrderCheckoutRoute, async (c) => {
     await publishMostradorEventBestEffort(c, {
       type: "mostrador.checkout_saved",
       resourceId: orderId,
+      channels: [orderResourceChannel(orderId)],
       payload: checkoutSavedPayload(orderId, result.data.updatedAt, checkout),
     })
   }

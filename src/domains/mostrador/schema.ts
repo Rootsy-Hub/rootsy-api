@@ -18,10 +18,12 @@ export const createCounterOrderBodySchema = z
     estimatedMinutes: z.number().int().min(15).max(60),
     notes: z.string().optional(),
     immediateFulfillment: z.boolean().optional(),
+    checkout: z.record(z.string(), z.unknown()).optional(),
   })
   .openapi("CreateCounterOrder")
 
 export const patchCounterOrderBodySchema = createCounterOrderBodySchema
+  .omit({ checkout: true })
   .partial()
   .openapi("PatchCounterOrder")
 
